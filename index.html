@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Work Order Viewer</title>
+    <link rel="stylesheet" href="./styles.css" />
+
+    <!-- CSV + XLSX parsers (client-side only) -->
+    <script
+      defer
+      src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"
+    ></script>
+    <script
+      defer
+      src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"
+    ></script>
+
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>Work Order Viewer</h1>
+        <p class="subtle">
+          Upload a CSV/XLSX, filter by dates/keywords/people, drag headers to
+          reorder columns, and see daily counts per employee.
+        </p>
+      </div>
+
+      <div class="file-box">
+        <label class="file-label" for="fileInput">Upload CSV/XLSX</label>
+        <input id="fileInput" type="file" accept=".csv,.xlsx,.xls" />
+        <div class="file-meta" id="fileMeta">No file loaded</div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel">
+        <h2>Filters</h2>
+
+        <div class="grid">
+          <div class="field">
+            <label for="searchInput">Keyword search</label>
+            <input
+              id="searchInput"
+              type="text"
+              placeholder="Search WO, description, equipment..."
+            />
+          </div>
+
+          <div class="field">
+            <label for="statusFilter">Status</label>
+            <select id="statusFilter"></select>
+          </div>
+
+          <div class="field">
+            <label for="typeFilter">Type</label>
+            <select id="typeFilter"></select>
+          </div>
+
+          <div class="field">
+            <label for="deptFilter">Department</label>
+            <select id="deptFilter"></select>
+          </div>
+
+          <div class="field">
+            <label for="assignedFilter">Assigned To</label>
+            <select id="assignedFilter"></select>
+          </div>
+
+          <div class="field">
+            <label for="dateFieldSelect">Date field</label>
+            <select id="dateFieldSelect"></select>
+          </div>
+
+          <div class="field">
+            <label for="dateFrom">From</label>
+            <input id="dateFrom" type="date" />
+          </div>
+
+          <div class="field">
+            <label for="dateTo">To</label>
+            <input id="dateTo" type="date" />
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="clearFiltersBtn" type="button">Clear filters</button>
+          <button id="resetColumnsBtn" type="button" class="secondary">
+            Reset column order
+          </button>
+        </div>
+
+        <div class="stats">
+          <div class="stat">
+            <div class="stat-label">Rows (filtered)</div>
+            <div class="stat-value" id="rowCount">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Unique employees</div>
+            <div class="stat-value" id="employeeCount">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Date range (filtered)</div>
+            <div class="stat-value" id="dateRangeLabel">—</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Daily counts by employee</h2>
+          <p class="subtle">
+            Counts are based on the selected “Date field” and the current
+            filters.
+          </p>
+        </div>
+
+        <div class="table-wrap" id="countsWrap">
+          <div class="empty">Upload a file to see counts.</div>
+        </div>
+      </section>
+
+      <section class="panel full">
+        <div class="panel-head">
+          <h2>Work Orders</h2>
+          <p class="subtle">
+            Click a header to sort. Drag headers to reorder columns (saved in
+            your browser).
+          </p>
+        </div>
+
+        <div class="table-wrap" id="dataWrap">
+          <div class="empty">Upload a file to view work orders.</div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span class="subtle">
+        Tip: This runs entirely in your browser. On GitHub Pages, it’s still
+        local-only file processing.
+      </span>
+    </footer>
+  </body>
+</html>
