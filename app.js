@@ -1,605 +1,663 @@
-/* Work Order Viewer
-   - Upload CSV
-   - Filter by keyword, date range, assigned/status/type/department
-   - Sort by clicking headers
-   - Drag headers to reorder; persists in localStorage
-   - Daily counts per employee; date column selectable
-   - Dates displayed as MM/DD/YYYY
+/* Work Order Viewer (CSV + XLSX)
+   - Drag headers to reorder columns (saved in localStorage)
+   - Filters + counts pivot by Assigned To x chosen date field
+   - MM/DD/YYYY formatting
 */
 
-const STORAGE_KEY_COL_ORDER = "wo_col_order_v1";
+const CANON = {
+  WORK_ORDER: "Work Order",
+  DESCRIPTION: "Description",
+  STATUS: "Status",
+  TYPE: "Type",
+  DEPARTMENT: "Department",
+  EQUIPMENT: "Equipment",
+  EQUIPMENT_DESC: "Equipment Description",
+  SCHED_START: "Sched. Start Date",
+  PM_DUE: "Original PM Due Date",
+  SCHED_END: "Sched. End Date",
+  ASSIGNED_TO: "Assigned To",
+};
 
-const CANON_COLUMNS = [
-  "Work Order",
-  "Description",
-  "Status",
-  "Type",
-  "Department",
-  "Equipment",
-  "Equipment Description",
-  "Scheduled start date",
-  "Original pm due date",
-  "Scheduled end date",
-  "Assigned to"
+const DISPLAY_NAMES = {
+  [CANON.WORK_ORDER]: "Work Order",
+  [CANON.DESCRIPTION]: "Description",
+  [CANON.STATUS]: "Status",
+  [CANON.TYPE]: "Type",
+  [CANON.DEPARTMENT]: "Department",
+  [CANON.EQUIPMENT]: "Equipment",
+  [CANON.EQUIPMENT_DESC]: "Equipment Description",
+  [CANON.SCHED_START]: "Scheduled start date",
+  [CANON.PM_DUE]: "Original PM due date",
+  [CANON.SCHED_END]: "Scheduled end date",
+  [CANON.ASSIGNED_TO]: "Assigned to",
+};
+
+const REQUIRED_CANON_ORDER = [
+  CANON.WORK_ORDER,
+  CANON.DESCRIPTION,
+  CANON.STATUS,
+  CANON.TYPE,
+  CANON.DEPARTMENT,
+  CANON.EQUIPMENT,
+  CANON.EQUIPMENT_DESC,
+  CANON.SCHED_START,
+  CANON.PM_DUE,
+  CANON.SCHED_END,
+  CANON.ASSIGNED_TO,
 ];
 
-// Some CSVs have slightly different header text; we’ll match loosely.
-const COLUMN_ALIASES = {
-  "Work Order": ["work order", "wo", "workorder", "work_order", "work order #", "work order number"],
-  "Description": ["description", "wo description", "work order description", "details"],
-  "Status": ["status", "wo status"],
-  "Type": ["type", "wo type", "work type"],
-  "Department": ["department", "dept"],
-  "Equipment": ["equipment", "asset", "asset number", "equipment id"],
-  "Equipment Description": ["equipment description", "asset description", "equip description", "equipment desc"],
-  "Scheduled start date": ["scheduled start date", "scheduled start", "sched start", "start date", "scheduled start"],
-  "Original pm due date": ["original pm due date", "pm due date", "original due date", "due date"],
-  "Scheduled end date": ["scheduled end date", "scheduled end", "sched end", "end date"],
-  "Assigned to": ["assigned to", "assigned", "assignee", "owner", "assigned_to"]
+const STORAGE_KEY = "wo_viewer_column_order_v1";
+
+const el = (id) => document.getElementById(id);
+
+const state = {
+  rawRows: [],
+  filteredRows: [],
+  columnOrder: [...REQUIRED_CANON_ORDER],
+  dragCol: null,
+  lastFileSig: null,
 };
 
-const els = {
-  fileInput: document.getElementById("fileInput"),
-  btnResetLayout: document.getElementById("btnResetLayout"),
-  btnClearData: document.getElementById("btnClearData"),
-
-  qSearch: document.getElementById("qSearch"),
-  assignedFilter: document.getElementById("assignedFilter"),
-  statusFilter: document.getElementById("statusFilter"),
-  typeFilter: document.getElementById("typeFilter"),
-  deptFilter: document.getElementById("deptFilter"),
-
-  dateFilterColumn: document.getElementById("dateFilterColumn"),
-  dateFrom: document.getElementById("dateFrom"),
-  dateTo: document.getElementById("dateTo"),
-
-  btnClearFilters: document.getElementById("btnClearFilters"),
-  rowCount: document.getElementById("rowCount"),
-
-  countDateColumn: document.getElementById("countDateColumn"),
-  countsWrap: document.getElementById("countsWrap"),
-
-  table: document.getElementById("dataTable"),
-  thead: document.querySelector("#dataTable thead"),
-  tbody: document.querySelector("#dataTable tbody"),
-  colDebug: document.getElementById("colDebug"),
-};
-
-let rawRows = [];        // parsed rows with original headers
-let rows = [];           // normalized rows with canonical columns only
-let visibleColumns = []; // current ordered canonical columns
-let sortState = { col: null, dir: "asc" }; // dir: asc|desc
-
-// ---------- Utilities ----------
 function normalizeHeader(s) {
-  if (s == null) return "";
-  return String(s)
-    .replace(/^\uFEFF/, "")  // remove BOM
+  return String(s ?? "")
     .trim()
     .toLowerCase()
-    .replace(/\s+/g, " ");
+    .replace(/[\s\.\-_/\\()]+/g, "")
+    .replace(/[^a-z0-9]/g, "");
 }
 
-function pickHeaderMap(headers) {
-  // Map canonical -> actual header in CSV, using aliases and fuzzy matching
-  const normToActual = new Map();
-  headers.forEach(h => normToActual.set(normalizeHeader(h), h));
+function guessCanonical(header) {
+  const h = normalizeHeader(header);
 
-  const headerMap = {};
+  // Work Order
+  if (h === "workorder" || h === "wo" || h.includes("workorder")) return CANON.WORK_ORDER;
 
-  for (const canon of CANON_COLUMNS) {
-    const targets = [canon, ...(COLUMN_ALIASES[canon] || [])];
-    let found = null;
+  // Description
+  if (h === "description" || h.includes("desc")) return CANON.DESCRIPTION;
 
-    // 1) exact normalized match
-    for (const t of targets) {
-      const key = normalizeHeader(t);
-      if (normToActual.has(key)) {
-        found = normToActual.get(key);
-        break;
-      }
-    }
+  // Status / Type / Department
+  if (h === "status") return CANON.STATUS;
+  if (h === "type") return CANON.TYPE;
+  if (h === "department" || h === "dept") return CANON.DEPARTMENT;
 
-    // 2) contains match (helps with things like "Scheduled start date (local)" etc.)
-    if (!found) {
-      const targetNorms = targets.map(normalizeHeader);
-      for (const [norm, actual] of normToActual.entries()) {
-        if (targetNorms.some(tn => norm.includes(tn))) {
-          found = actual;
-          break;
-        }
-      }
-    }
+  // Equipment & Equipment Description
+  if (h === "equipment") return CANON.EQUIPMENT;
+  if (h === "equipmentdescription" || (h.includes("equipment") && h.includes("description")))
+    return CANON.EQUIPMENT_DESC;
 
-    headerMap[canon] = found; // may be null if missing
+  // Dates (match common variants)
+  if (h.includes("sched") && h.includes("start")) return CANON.SCHED_START;
+  if (h.includes("scheduled") && h.includes("start")) return CANON.SCHED_START;
+  if (h.includes("original") && h.includes("pm") && h.includes("due")) return CANON.PM_DUE;
+  if (h.includes("pm") && h.includes("due")) return CANON.PM_DUE;
+  if (h.includes("sched") && h.includes("end")) return CANON.SCHED_END;
+  if (h.includes("scheduled") && h.includes("end")) return CANON.SCHED_END;
+
+  // Assigned To
+  if (h.includes("assigned") && h.includes("to")) return CANON.ASSIGNED_TO;
+
+  return null;
+}
+
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function formatMMDDYYYY(dateObj) {
+  if (!(dateObj instanceof Date) || isNaN(dateObj)) return "";
+  return `${pad2(dateObj.getMonth() + 1)}/${pad2(dateObj.getDate())}/${dateObj.getFullYear()}`;
+}
+
+function toISODate(dateObj) {
+  if (!(dateObj instanceof Date) || isNaN(dateObj)) return "";
+  return `${dateObj.getFullYear()}-${pad2(dateObj.getMonth() + 1)}-${pad2(dateObj.getDate())}`;
+}
+
+// Excel serial date to JS Date (handles typical modern Excel)
+function excelSerialToDate(serial) {
+  // Excel incorrectly treats 1900 as leap year; base at 1899-12-30 works for most cases
+  const utcDays = Math.floor(serial - 25569);
+  const utcValue = utcDays * 86400; // seconds
+  return new Date(utcValue * 1000);
+}
+
+function parseMaybeDate(v) {
+  if (v == null || v === "") return null;
+
+  // If already a Date
+  if (v instanceof Date && !isNaN(v)) return v;
+
+  // If an Excel serial number
+  if (typeof v === "number" && v > 20000 && v < 60000) {
+    const d = excelSerialToDate(v);
+    return isNaN(d) ? null : d;
   }
 
-  return headerMap;
-}
+  // If string, try Date parse (works if CSV is like 12/27/2025 or 2025-12-27)
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return null;
 
-function parseDateFlexible(v) {
-  if (v == null) return null;
-  const s = String(v).trim();
-  if (!s) return null;
+    // Prefer MM/DD/YYYY parsing when it looks like it
+    const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (m) {
+      const mm = Number(m[1]);
+      const dd = Number(m[2]);
+      const yy = Number(m[3]) < 100 ? 2000 + Number(m[3]) : Number(m[3]);
+      const d = new Date(yy, mm - 1, dd);
+      return isNaN(d) ? null : d;
+    }
 
-  // Try ISO (YYYY-MM-DD or YYYY-MM-DDTHH:mm...)
-  const iso = new Date(s);
-  if (!Number.isNaN(iso.getTime())) return iso;
-
-  // Try MM/DD/YYYY or M/D/YYYY (optionally with time)
-  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+.*)?$/);
-  if (m) {
-    let mm = parseInt(m[1], 10);
-    let dd = parseInt(m[2], 10);
-    let yy = parseInt(m[3], 10);
-    if (yy < 100) yy += 2000;
-    const d = new Date(yy, mm - 1, dd);
-    if (!Number.isNaN(d.getTime())) return d;
+    const d = new Date(s);
+    return isNaN(d) ? null : d;
   }
 
   return null;
 }
 
-function formatMMDDYYYY(dateObj) {
-  if (!dateObj) return "";
-  const mm = String(dateObj.getMonth() + 1).padStart(2, "0");
-  const dd = String(dateObj.getDate()).padStart(2, "0");
-  const yy = dateObj.getFullYear();
-  return `${mm}/${dd}/${yy}`;
-}
-
-function toDateInputValue(dateObj) {
-  // YYYY-MM-DD for <input type=date>
-  if (!dateObj) return "";
-  const mm = String(dateObj.getMonth() + 1).padStart(2, "0");
-  const dd = String(dateObj.getDate()).padStart(2, "0");
-  const yy = dateObj.getFullYear();
-  return `${yy}-${mm}-${dd}`;
-}
-
-function escapeHtml(s) {
-  return String(s ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function uniqueSorted(values) {
-  const set = new Set(values.filter(v => String(v ?? "").trim() !== ""));
-  return Array.from(set).sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
-}
-
-function loadColumnOrder() {
+function loadSavedColumnOrder() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_COL_ORDER);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return null;
-
-    // Must contain only known columns; ignore unknowns
-    const filtered = parsed.filter(c => CANON_COLUMNS.includes(c));
-    // Add any missing columns at the end (in default order)
-    for (const c of CANON_COLUMNS) if (!filtered.includes(c)) filtered.push(c);
-    return filtered;
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+    if (Array.isArray(saved) && saved.length) {
+      // only keep columns we support, preserve order, add missing
+      const filtered = saved.filter((c) => REQUIRED_CANON_ORDER.includes(c));
+      const missing = REQUIRED_CANON_ORDER.filter((c) => !filtered.includes(c));
+      state.columnOrder = [...filtered, ...missing];
+    } else {
+      state.columnOrder = [...REQUIRED_CANON_ORDER];
+    }
   } catch {
-    return null;
+    state.columnOrder = [...REQUIRED_CANON_ORDER];
   }
 }
 
-function saveColumnOrder(order) {
-  localStorage.setItem(STORAGE_KEY_COL_ORDER, JSON.stringify(order));
+function saveColumnOrder() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.columnOrder));
 }
 
-// ---------- Parsing ----------
-function parseCsvFile(file) {
-  Papa.parse(file, {
-    header: true,
-    skipEmptyLines: true,
-    dynamicTyping: false,
-    transformHeader: h => h, // keep original header text; we normalize later
-    complete: (results) => {
-      if (results.errors && results.errors.length) {
-        console.warn("CSV parse errors:", results.errors);
-      }
-      rawRows = results.data || [];
-      onDataLoaded(results.meta?.fields || []);
-    }
-  });
+function fileSignature(headersCanon) {
+  return REQUIRED_CANON_ORDER.map((c) => (headersCanon.includes(c) ? "1" : "0")).join("");
 }
 
-function onDataLoaded(headers) {
-  if (!headers || headers.length === 0) {
-    // Sometimes PapaParse doesn’t give meta fields when headers are weird; derive from first row
-    headers = rawRows.length ? Object.keys(rawRows[0]) : [];
+function setStats(rows) {
+  el("statRows").textContent = rows.length.toLocaleString();
+
+  const people = new Set(rows.map((r) => (r[CANON.ASSIGNED_TO] || "").trim()).filter(Boolean));
+  el("statPeople").textContent = people.size.toLocaleString();
+
+  // date span based on chosen count date column
+  const dateField = el("countDateColumn").value;
+  const dates = rows.map((r) => r.__dates?.[dateField]).filter(Boolean);
+  if (!dates.length) {
+    el("statSpan").textContent = "—";
+  } else {
+    dates.sort((a, b) => a - b);
+    el("statSpan").textContent = `${formatMMDDYYYY(dates[0])} → ${formatMMDDYYYY(dates[dates.length - 1])}`;
   }
-
-  // Debug: show loaded headers
-  els.colDebug.textContent = headers.length
-    ? headers.join(" | ")
-    : "No headers detected. Make sure your CSV has a header row.";
-
-  const headerMap = pickHeaderMap(headers);
-
-  // Normalize into canonical rows only
-  rows = rawRows.map(r => {
-    const obj = {};
-    for (const canon of CANON_COLUMNS) {
-      const actual = headerMap[canon];
-      const value = actual ? r[actual] : "";
-      obj[canon] = (value ?? "").toString().trim();
-    }
-
-    // Parse dates into hidden fields for filtering/sorting
-    obj.__date = {
-      "Scheduled start date": parseDateFlexible(obj["Scheduled start date"]),
-      "Original pm due date": parseDateFlexible(obj["Original pm due date"]),
-      "Scheduled end date": parseDateFlexible(obj["Scheduled end date"]),
-    };
-
-    return obj;
-  });
-
-  // Set visible columns from saved order (or default)
-  visibleColumns = loadColumnOrder() || [...CANON_COLUMNS];
-
-  // Build filter dropdown values
-  rebuildFilterOptions();
-
-  // Render everything
-  renderTable();
-  renderCounts();
 }
 
-// ---------- Filters ----------
-function rebuildFilterOptions() {
-  const assigned = uniqueSorted(rows.map(r => r["Assigned to"]));
-  const status = uniqueSorted(rows.map(r => r["Status"]));
-  const type = uniqueSorted(rows.map(r => r["Type"]));
-  const dept = uniqueSorted(rows.map(r => r["Department"]));
+function rebuildFilterOptions(rows) {
+  // Unique values from RAW data
+  const uniq = (arr) => Array.from(new Set(arr.filter(Boolean))).sort((a, b) => a.localeCompare(b));
 
-  fillSelect(els.assignedFilter, assigned, "All");
-  fillSelect(els.statusFilter, status, "All");
-  fillSelect(els.typeFilter, type, "All");
-  fillSelect(els.deptFilter, dept, "All");
+  const statuses = uniq(rows.map((r) => r[CANON.STATUS]));
+  const types = uniq(rows.map((r) => r[CANON.TYPE]));
+  const depts = uniq(rows.map((r) => r[CANON.DEPARTMENT]));
+  const people = uniq(rows.map((r) => r[CANON.ASSIGNED_TO]));
+
+  fillSelect(el("status"), statuses, true);
+  fillSelect(el("type"), types, true);
+  fillSelect(el("department"), depts, true);
+  fillMultiSelect(el("assignedTo"), people);
 }
 
-function fillSelect(sel, items, allLabel) {
-  const current = sel.value;
-  sel.innerHTML = "";
-  const optAll = document.createElement("option");
-  optAll.value = "";
-  optAll.textContent = allLabel;
-  sel.appendChild(optAll);
-
-  for (const it of items) {
+function fillSelect(selectEl, values, keepAllOption) {
+  const current = selectEl.value;
+  selectEl.innerHTML = "";
+  if (keepAllOption) {
     const opt = document.createElement("option");
-    opt.value = it;
-    opt.textContent = it;
-    sel.appendChild(opt);
+    opt.value = "";
+    opt.textContent = "All";
+    selectEl.appendChild(opt);
   }
-
-  // keep selection if still present
-  if ([...sel.options].some(o => o.value === current)) {
-    sel.value = current;
-  }
+  values.forEach((v) => {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = v;
+    selectEl.appendChild(opt);
+  });
+  // restore if exists
+  if ([...selectEl.options].some((o) => o.value === current)) selectEl.value = current;
 }
 
-function getFilteredRows() {
-  const q = els.qSearch.value.trim().toLowerCase();
-  const assigned = els.assignedFilter.value;
-  const status = els.statusFilter.value;
-  const type = els.typeFilter.value;
-  const dept = els.deptFilter.value;
+function fillMultiSelect(selectEl, values) {
+  const prev = new Set([...selectEl.selectedOptions].map((o) => o.value));
+  selectEl.innerHTML = "";
+  values.forEach((v) => {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = v;
+    if (prev.has(v)) opt.selected = true;
+    selectEl.appendChild(opt);
+  });
+}
 
-  const dateCol = els.dateFilterColumn.value;
-  const from = els.dateFrom.value ? new Date(els.dateFrom.value + "T00:00:00") : null;
-  const to = els.dateTo.value ? new Date(els.dateTo.value + "T23:59:59") : null;
+function getSelectedMulti(selectEl) {
+  return new Set([...selectEl.selectedOptions].map((o) => o.value));
+}
 
-  return rows.filter(r => {
-    if (assigned && r["Assigned to"] !== assigned) return false;
-    if (status && r["Status"] !== status) return false;
-    if (type && r["Type"] !== type) return false;
-    if (dept && r["Department"] !== dept) return false;
+function textHaystack(row) {
+  const parts = [
+    row[CANON.WORK_ORDER],
+    row[CANON.DESCRIPTION],
+    row[CANON.STATUS],
+    row[CANON.TYPE],
+    row[CANON.DEPARTMENT],
+    row[CANON.EQUIPMENT],
+    row[CANON.EQUIPMENT_DESC],
+    row[CANON.ASSIGNED_TO],
+    row[CANON.SCHED_START],
+    row[CANON.PM_DUE],
+    row[CANON.SCHED_END],
+  ];
+  return parts.map((p) => String(p ?? "")).join(" ").toLowerCase();
+}
 
-    if (q) {
-      // Search across visible canonical columns (not the hidden date fields)
-      const hay = CANON_COLUMNS.map(c => (r[c] ?? "").toString().toLowerCase()).join(" | ");
-      if (!hay.includes(q)) return false;
+function applyFilters() {
+  const kw = el("keyword").value.trim().toLowerCase();
+  const status = el("status").value;
+  const type = el("type").value;
+  const dept = el("department").value;
+  const peopleSet = getSelectedMulti(el("assignedTo"));
+
+  const dateField = el("countDateColumn").value;
+  const fromISO = el("dateFrom").value; // yyyy-mm-dd
+  const toISO = el("dateTo").value;
+
+  const from = fromISO ? new Date(fromISO + "T00:00:00") : null;
+  const to = toISO ? new Date(toISO + "T23:59:59") : null;
+
+  const rows = state.rawRows.filter((r) => {
+    if (kw && !textHaystack(r).includes(kw)) return false;
+    if (status && (r[CANON.STATUS] || "") !== status) return false;
+    if (type && (r[CANON.TYPE] || "") !== type) return false;
+    if (dept && (r[CANON.DEPARTMENT] || "") !== dept) return false;
+
+    if (peopleSet.size) {
+      const who = (r[CANON.ASSIGNED_TO] || "").trim();
+      if (!peopleSet.has(who)) return false;
     }
 
-    if (from || to) {
-      const d = r.__date?.[dateCol] || null;
-      if (!d) return false;
-      if (from && d < from) return false;
-      if (to && d > to) return false;
-    }
+    // Date range applies to chosen dateField
+    const d = r.__dates?.[dateField] || null;
+    if (from && (!d || d < from)) return false;
+    if (to && (!d || d > to)) return false;
 
     return true;
   });
+
+  state.filteredRows = rows;
+  setStats(rows);
+  renderDataTable(rows);
+  renderCounts(rows);
 }
 
-// ---------- Table Rendering ----------
-function renderTable() {
-  const filtered = getFilteredRows();
+function renderDataTable(rows) {
+  const table = el("dataTable");
+  const thead = table.querySelector("thead");
+  const tbody = table.querySelector("tbody");
+  thead.innerHTML = "";
+  tbody.innerHTML = "";
 
-  // apply sorting
-  const sorted = applySort(filtered);
-
-  // header
-  els.thead.innerHTML = "";
+  // Header
   const tr = document.createElement("tr");
-
-  visibleColumns.forEach(col => {
+  state.columnOrder.forEach((canonKey, idx) => {
     const th = document.createElement("th");
-    th.textContent = headerLabel(col);
-    th.dataset.col = col;
-    th.title = "Click to sort • Drag to reorder";
+    th.textContent = DISPLAY_NAMES[canonKey] || canonKey;
+    th.draggable = true;
+    th.dataset.col = canonKey;
+    th.dataset.idx = String(idx);
 
-    // sort indicator
-    if (sortState.col === col) {
-      th.textContent = headerLabel(col) + (sortState.dir === "asc" ? " ▲" : " ▼");
-    }
+    th.addEventListener("dragstart", (e) => {
+      state.dragCol = canonKey;
+      th.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+    });
+    th.addEventListener("dragend", () => {
+      th.classList.remove("dragging");
+      state.dragCol = null;
+    });
+    th.addEventListener("dragover", (e) => e.preventDefault());
+    th.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const targetCol = th.dataset.col;
+      if (!state.dragCol || state.dragCol === targetCol) return;
 
-    th.addEventListener("click", () => toggleSort(col));
+      const order = [...state.columnOrder];
+      const from = order.indexOf(state.dragCol);
+      const to = order.indexOf(targetCol);
+      order.splice(from, 1);
+      order.splice(to, 0, state.dragCol);
+
+      state.columnOrder = order;
+      saveColumnOrder();
+      renderDataTable(state.filteredRows);
+    });
+
     tr.appendChild(th);
   });
+  thead.appendChild(tr);
 
-  els.thead.appendChild(tr);
+  // Body
+  if (!rows.length) {
+    const empty = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = state.columnOrder.length;
+    td.style.color = "var(--muted)";
+    td.textContent = "No rows match your filters (or no data loaded yet).";
+    empty.appendChild(td);
+    tbody.appendChild(empty);
+    return;
+  }
 
-  // enable drag reorder on header row
-  enableHeaderDrag(tr);
-
-  // body
-  els.tbody.innerHTML = "";
-  const frag = document.createDocumentFragment();
-
-  for (const r of sorted) {
+  for (const r of rows) {
     const rowEl = document.createElement("tr");
-
-    for (const col of visibleColumns) {
+    for (const canonKey of state.columnOrder) {
       const td = document.createElement("td");
-
-      if (isDateColumn(col)) {
-        const d = r.__date?.[col] || null;
-        td.textContent = d ? formatMMDDYYYY(d) : (r[col] || "");
-      } else {
-        td.innerHTML = escapeHtml(r[col] || "");
-      }
-
+      td.textContent = String(r[canonKey] ?? "");
       rowEl.appendChild(td);
     }
+    tbody.appendChild(rowEl);
+  }
+}
 
-    frag.appendChild(rowEl);
+function renderCounts(rows) {
+  const dateField = el("countDateColumn").value;
+  const whoField = CANON.ASSIGNED_TO;
+
+  const people = Array.from(new Set(rows.map((r) => (r[whoField] || "").trim()).filter(Boolean)))
+    .sort((a, b) => a.localeCompare(b));
+
+  // Dates based on parsed dates for dateField
+  const dates = Array.from(
+    new Set(
+      rows
+        .map((r) => r.__dates?.[dateField])
+        .filter(Boolean)
+        .map((d) => toISODate(d))
+    )
+  ).sort();
+
+  const pivot = new Map(); // key: person -> Map(dateISO -> count)
+  for (const p of people) pivot.set(p, new Map());
+
+  for (const r of rows) {
+    const p = (r[whoField] || "").trim();
+    const dObj = r.__dates?.[dateField] || null;
+    if (!p || !dObj) continue;
+    const dISO = toISODate(dObj);
+    const m = pivot.get(p) || new Map();
+    m.set(dISO, (m.get(dISO) || 0) + 1);
+    pivot.set(p, m);
   }
 
-  els.tbody.appendChild(frag);
-  els.rowCount.textContent = `${sorted.length} rows`;
+  const table = el("countsTable");
+  const thead = table.querySelector("thead");
+  const tbody = table.querySelector("tbody");
+  thead.innerHTML = "";
+  tbody.innerHTML = "";
 
-  // counts should reflect current filters
-  renderCounts();
-}
-
-function headerLabel(col) {
-  return col; // you can customize labels here if you want shorter text
-}
-
-function isDateColumn(col) {
-  return col === "Scheduled start date" || col === "Original pm due date" || col === "Scheduled end date";
-}
-
-function toggleSort(col) {
-  if (sortState.col === col) {
-    sortState.dir = sortState.dir === "asc" ? "desc" : "asc";
-  } else {
-    sortState.col = col;
-    sortState.dir = "asc";
-  }
-  renderTable();
-}
-
-function applySort(list) {
-  const { col, dir } = sortState;
-  if (!col) return list;
-
-  const mult = dir === "asc" ? 1 : -1;
-  const copy = [...list];
-
-  copy.sort((a, b) => {
-    let av, bv;
-
-    if (isDateColumn(col)) {
-      av = a.__date?.[col]?.getTime?.() ?? null;
-      bv = b.__date?.[col]?.getTime?.() ?? null;
-      if (av == null && bv == null) return 0;
-      if (av == null) return 1 * mult;  // null dates go to bottom
-      if (bv == null) return -1 * mult;
-      return (av - bv) * mult;
-    }
-
-    av = (a[col] ?? "").toString();
-    bv = (b[col] ?? "").toString();
-    return av.localeCompare(bv, undefined, { numeric: true, sensitivity: "base" }) * mult;
-  });
-
-  return copy;
-}
-
-function enableHeaderDrag(headerRowEl) {
-  // Destroy/recreate safe: Sortable attaches to the element and persists.
-  // We’ll just create once if not present.
-  if (headerRowEl.__sortableAttached) return;
-  headerRowEl.__sortableAttached = true;
-
-  Sortable.create(headerRowEl, {
-    animation: 120,
-    ghostClass: "dragging",
-    onEnd: () => {
-      const newOrder = [...headerRowEl.querySelectorAll("th")].map(th => th.dataset.col);
-      visibleColumns = newOrder;
-      saveColumnOrder(visibleColumns);
-      renderTable(); // re-render to ensure body matches
-    }
-  });
-}
-
-// ---------- Counts ----------
-function renderCounts() {
-  const filtered = getFilteredRows();
-  const dateCol = els.countDateColumn.value;
-
-  // group by day then by employee
-  const dayMap = new Map(); // dayStr -> Map(employee -> count)
-
-  for (const r of filtered) {
-    const assignee = (r["Assigned to"] || "").trim() || "(Unassigned)";
-    const d = r.__date?.[dateCol] || null;
-    const dayStr = d ? formatMMDDYYYY(d) : "(No date)";
-
-    if (!dayMap.has(dayStr)) dayMap.set(dayStr, new Map());
-    const empMap = dayMap.get(dayStr);
-
-    empMap.set(assignee, (empMap.get(assignee) || 0) + 1);
-  }
-
-  // Sort days (real dates first, then no date)
-  const days = Array.from(dayMap.keys());
-  days.sort((a, b) => {
-    const da = parseDateFlexible(a);
-    const db = parseDateFlexible(b);
-    if (a === "(No date)") return 1;
-    if (b === "(No date)") return -1;
-    if (da && db) return da - db;
-    return a.localeCompare(b);
-  });
-
-  if (!rows.length) {
-    els.countsWrap.innerHTML = `<div class="emptyState">Upload a CSV to see counts.</div>`;
+  // If no data/dates
+  if (!rows.length || !dates.length || !people.length) {
+    thead.innerHTML = `<tr><th>Assigned To</th><th>Count</th></tr>`;
+    tbody.innerHTML = `<tr><td style="color:var(--muted)" colspan="2">No counts to show yet.</td></tr>`;
     return;
   }
 
-  if (days.length === 0) {
-    els.countsWrap.innerHTML = `<div class="emptyState">No matching rows for current filters.</div>`;
-    return;
+  // Header row: Assigned To + dates + Total
+  const hr = document.createElement("tr");
+  const h0 = document.createElement("th");
+  h0.textContent = "Assigned To";
+  h0.draggable = false;
+  hr.appendChild(h0);
+
+  for (const dISO of dates) {
+    const th = document.createElement("th");
+    const d = new Date(dISO + "T00:00:00");
+    th.textContent = formatMMDDYYYY(d);
+    th.draggable = false;
+    hr.appendChild(th);
   }
 
-  // Build a compact table of day + top-level totals + expand-like detail (simple layout)
-  // We'll show each day with employees under it.
-  let html = `<table class="countsTable">
-    <thead>
-      <tr>
-        <th style="width: 140px;">Day</th>
-        <th>Employee</th>
-        <th style="width: 90px;">Count</th>
-      </tr>
-    </thead>
-    <tbody>
-  `;
+  const hT = document.createElement("th");
+  hT.textContent = "Total";
+  hT.draggable = false;
+  hr.appendChild(hT);
+  thead.appendChild(hr);
 
-  for (const day of days) {
-    const empMap = dayMap.get(day);
-    const empEntries = Array.from(empMap.entries())
-      .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+  // Body rows per person
+  const colTotals = new Map(dates.map((d) => [d, 0]));
+  let grandTotal = 0;
 
-    // Day total
-    const total = empEntries.reduce((sum, [, c]) => sum + c, 0);
+  for (const p of people) {
+    const tr = document.createElement("tr");
+    const tdName = document.createElement("td");
+    tdName.textContent = p;
+    tr.appendChild(tdName);
 
-    // First row: day + total badge, first employee
-    for (let i = 0; i < empEntries.length; i++) {
-      const [emp, cnt] = empEntries[i];
-      if (i === 0) {
-        html += `
-          <tr>
-            <td>
-              <div>${escapeHtml(day)}</div>
-              <div class="badge" style="margin-top:6px;">Total: ${total}</div>
-            </td>
-            <td>${escapeHtml(emp)}</td>
-            <td><strong>${cnt}</strong></td>
-          </tr>
-        `;
+    let rowTotal = 0;
+    const m = pivot.get(p) || new Map();
+
+    for (const dISO of dates) {
+      const td = document.createElement("td");
+      const c = m.get(dISO) || 0;
+      td.textContent = String(c);
+      rowTotal += c;
+      colTotals.set(dISO, (colTotals.get(dISO) || 0) + c);
+      tr.appendChild(td);
+    }
+
+    const tdTot = document.createElement("td");
+    tdTot.textContent = String(rowTotal);
+    tr.appendChild(tdTot);
+
+    grandTotal += rowTotal;
+    tbody.appendChild(tr);
+  }
+
+  // Totals row
+  const trTot = document.createElement("tr");
+  const tdLabel = document.createElement("td");
+  tdLabel.textContent = "TOTAL";
+  tdLabel.style.fontWeight = "800";
+  trTot.appendChild(tdLabel);
+
+  for (const dISO of dates) {
+    const td = document.createElement("td");
+    td.textContent = String(colTotals.get(dISO) || 0);
+    td.style.fontWeight = "800";
+    trTot.appendChild(td);
+  }
+
+  const tdGrand = document.createElement("td");
+  tdGrand.textContent = String(grandTotal);
+  tdGrand.style.fontWeight = "900";
+  trTot.appendChild(tdGrand);
+  tbody.appendChild(trTot);
+}
+
+function standardizeRows(rawObjects) {
+  // Build a mapping from source headers -> canonical
+  const headers = Object.keys(rawObjects[0] || {});
+  const headerToCanon = new Map();
+  for (const h of headers) {
+    const canon = guessCanonical(h);
+    if (canon) headerToCanon.set(h, canon);
+  }
+
+  // Build standardized rows with canonical keys
+  const out = rawObjects.map((obj) => {
+    const r = {};
+    for (const canonKey of REQUIRED_CANON_ORDER) r[canonKey] = "";
+
+    // dates parsed stored separately
+    r.__dates = {
+      [CANON.SCHED_START]: null,
+      [CANON.PM_DUE]: null,
+      [CANON.SCHED_END]: null,
+    };
+
+    for (const [srcHeader, canonKey] of headerToCanon.entries()) {
+      const v = obj[srcHeader];
+
+      // If this is one of our date columns, parse+format to MM/DD/YYYY
+      if (canonKey === CANON.SCHED_START || canonKey === CANON.PM_DUE || canonKey === CANON.SCHED_END) {
+        const d = parseMaybeDate(v);
+        r.__dates[canonKey] = d;
+        r[canonKey] = d ? formatMMDDYYYY(d) : (v == null ? "" : String(v).trim());
       } else {
-        html += `
-          <tr>
-            <td></td>
-            <td>${escapeHtml(emp)}</td>
-            <td><strong>${cnt}</strong></td>
-          </tr>
-        `;
+        r[canonKey] = v == null ? "" : String(v).trim();
       }
     }
-  }
 
-  html += `</tbody></table>`;
-  els.countsWrap.innerHTML = html;
+    return r;
+  });
+
+  // Keep a signature so saved column order applies safely across files
+  const presentCanon = Array.from(new Set(Array.from(headerToCanon.values())));
+  state.lastFileSig = fileSignature(presentCanon);
+
+  return out;
 }
 
-// ---------- Events ----------
-els.fileInput.addEventListener("change", (e) => {
-  const file = e.target.files?.[0];
+function readCSV(file) {
+  return new Promise((resolve, reject) => {
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      dynamicTyping: false,
+      complete: (results) => resolve(results.data || []),
+      error: (err) => reject(err),
+    });
+  });
+}
+
+function readXLSX(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        const wsName = wb.SheetNames[0];
+        const ws = wb.Sheets[wsName];
+        const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
+        resolve(json);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+async function handleUpload(file) {
   if (!file) return;
 
-  if (!file.name.toLowerCase().endsWith(".csv")) {
-    alert("Please upload a .csv file.");
+  const name = file.name.toLowerCase();
+  let rawObjects = [];
+
+  try {
+    if (name.endsWith(".csv")) {
+      rawObjects = await readCSV(file);
+    } else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
+      rawObjects = await readXLSX(file);
+    } else {
+      alert("Please upload a .csv or .xlsx/.xls file.");
+      return;
+    }
+  } catch (err) {
+    console.error(err);
+    alert("Failed to read the file. Check the console for details.");
     return;
   }
 
-  // Reset sort on new load
-  sortState = { col: null, dir: "asc" };
+  if (!rawObjects.length) {
+    alert("No rows found in that file.");
+    return;
+  }
 
-  parseCsvFile(file);
-});
+  // Standardize
+  const standardized = standardizeRows(rawObjects);
 
-[
-  els.qSearch,
-  els.assignedFilter,
-  els.statusFilter,
-  els.typeFilter,
-  els.deptFilter,
-  els.dateFilterColumn,
-  els.dateFrom,
-  els.dateTo,
-  els.countDateColumn
-].forEach(el => el.addEventListener("input", renderTable));
+  // Validate at least Work Order exists
+  const hasWO = standardized.some((r) => String(r[CANON.WORK_ORDER] || "").trim() !== "");
+  if (!hasWO) {
+    alert(
+      "I loaded the file, but I couldn't find a 'Work Order' column (or it was empty). " +
+      "If your headers are different, tell me what they are and I’ll map them."
+    );
+  }
 
-els.btnClearFilters.addEventListener("click", () => {
-  els.qSearch.value = "";
-  els.assignedFilter.value = "";
-  els.statusFilter.value = "";
-  els.typeFilter.value = "";
-  els.deptFilter.value = "";
-  els.dateFrom.value = "";
-  els.dateTo.value = "";
-  els.dateFilterColumn.value = "Scheduled start date";
-  els.countDateColumn.value = "Scheduled start date";
-  renderTable();
-});
+  state.rawRows = standardized;
 
-els.btnResetLayout.addEventListener("click", () => {
-  localStorage.removeItem(STORAGE_KEY_COL_ORDER);
-  visibleColumns = [...CANON_COLUMNS];
-  renderTable();
-});
+  // Build filter dropdowns from raw data
+  rebuildFilterOptions(state.rawRows);
 
-els.btnClearData.addEventListener("click", () => {
-  rawRows = [];
-  rows = [];
-  els.thead.innerHTML = "";
-  els.tbody.innerHTML = "";
-  els.rowCount.textContent = "0 rows";
-  els.colDebug.textContent = "No file loaded.";
-  els.countsWrap.innerHTML = `<div class="emptyState">Upload a CSV to see counts.</div>`;
+  // Apply filters + render
+  applyFilters();
+}
 
-  // reset filters dropdowns
-  ["assignedFilter","statusFilter","typeFilter","deptFilter"].forEach(id => {
-    const sel = els[id];
-    sel.innerHTML = `<option value="">All</option>`;
-    sel.value = "";
+function resetAll() {
+  // Clear UI filters
+  el("keyword").value = "";
+  el("status").value = "";
+  el("type").value = "";
+  el("department").value = "";
+  el("dateFrom").value = "";
+  el("dateTo").value = "";
+  el("countDateColumn").value = CANON.SCHED_START;
+
+  // Clear people selection
+  [...el("assignedTo").options].forEach((o) => (o.selected = false));
+
+  // Reset column order to saved, else default
+  loadSavedColumnOrder();
+
+  applyFilters();
+}
+
+function wireUI() {
+  el("fileInput").addEventListener("change", (e) => {
+    const file = e.target.files && e.target.files[0];
+    handleUpload(file);
   });
 
-  els.fileInput.value = "";
-});
+  el("resetBtn").addEventListener("click", () => resetAll());
 
-// On first load, use saved column order even before a file is loaded
-visibleColumns = loadColumnOrder() || [...CANON_COLUMNS];
+  // Filter events
+  ["keyword", "status", "type", "department", "dateFrom", "dateTo", "assignedTo", "countDateColumn"].forEach((id) => {
+    el(id).addEventListener("input", applyFilters);
+    el(id).addEventListener("change", applyFilters);
+  });
+
+  el("selectAllPeople").addEventListener("click", () => {
+    [...el("assignedTo").options].forEach((o) => (o.selected = true));
+    applyFilters();
+  });
+
+  el("clearPeople").addEventListener("click", () => {
+    [...el("assignedTo").options].forEach((o) => (o.selected = false));
+    applyFilters();
+  });
+}
+
+// Init
+loadSavedColumnOrder();
+wireUI();
+
+// Initial empty render
+renderDataTable([]);
+renderCounts([]);
+setStats([]);
