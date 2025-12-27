@@ -1,694 +1,640 @@
-/* Work Order Viewer (client-side)
-   - Upload CSV/XLSX
-   - Keep only desired columns
-   - Filter by keyword / employee / status / type / dept / date range
-   - Sort by clicking header
-   - Drag headers to rearrange columns (saved in localStorage)
-   - Summary pivot: counts per Assigned To per day (Sched. Start Date)
-   - Dates displayed as MM/DD/YYYY
+/* Work Order Viewer (CSV/XLSX) - GitHub Pages friendly
+   - Tabulator for table, column move, persistence
+   - PapaParse for CSV
+   - SheetJS for XLSX
+   - Luxon for date parsing/formatting (MM/DD/YYYY display)
 */
 
-const STORAGE_KEY = "wo_viewer_column_order_v1";
+const { DateTime } = luxon;
 
-const WANTED = [
-  { key: "work_order", label: "Work Order" },
-  { key: "description", label: "Description" },
-  { key: "status", label: "Status" },
-  { key: "type", label: "Type" },
-  { key: "department", label: "Department" },
-  { key: "equipment", label: "Equipment" },
-  { key: "equipment_description", label: "Equipment Description" },
-  { key: "sched_start_date", label: "Scheduled start date" },
-  { key: "original_pm_due_date", label: "Original pm due date" },
-  { key: "sched_end_date", label: "Scheduled end date" },
-  { key: "assigned_to", label: "Assigned to" },
-];
-
-// Header normalization helpers
-function normHeader(h) {
-  return String(h || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .replace(/[^\w\s.]/g, ""); // keep dots because your sample uses "Sched. Start Date"
-}
-function makeHeaderMap(headers) {
-  // Map file headers → our keys (handles variations)
-  const map = {};
-  const normalized = headers.map(h => ({ raw: h, n: normHeader(h) }));
-
-  function pick(key, candidates) {
-    for (const c of candidates) {
-      const hit = normalized.find(x => x.n === c);
-      if (hit) { map[key] = hit.raw; return; }
-    }
-    // fallback: contains
-    for (const c of candidates) {
-      const hit = normalized.find(x => x.n.includes(c));
-      if (hit) { map[key] = hit.raw; return; }
-    }
-  }
-
-  pick("work_order", ["work order", "workorder", "wo", "work_order"]);
-  pick("description", ["description", "wo description", "work order description"]);
-  pick("status", ["status"]);
-  pick("type", ["type", "work type"]);
-  pick("department", ["department", "dept"]);
-  pick("equipment", ["equipment", "equip"]);
-  pick("equipment_description", ["equipment description", "equip description"]);
-  pick("sched_start_date", ["sched. start date", "scheduled start date", "sched start date", "start date"]);
-  pick("original_pm_due_date", ["original pm due date", "pm due date", "original due date", "due date"]);
-  pick("sched_end_date", ["sched. end date", "scheduled end date", "sched end date", "end date"]);
-  pick("assigned_to", ["assigned to", "assigned_to", "assignee", "assigned"]);
-
-  return map;
-}
-
-// Date formatting/parsing
-const fmtUS = new Intl.DateTimeFormat("en-US", { year: "numeric", month: "2-digit", day: "2-digit" });
-
-function parseDateLoose(val) {
-  if (val == null || val === "") return null;
-
-  // If already a Date
-  if (val instanceof Date && !isNaN(val)) return val;
-
-  // If it's an Excel serial number (common in XLSX conversions)
-  if (typeof val === "number" && isFinite(val)) {
-    // Excel's epoch starts 1899-12-30 for most systems
-    const ms = Math.round((val - 25569) * 86400 * 1000);
-    const d = new Date(ms);
-    return isNaN(d) ? null : d;
-  }
-
-  const s = String(val).trim();
-  if (!s) return null;
-
-  // If it's ISO-like: 2025-12-27
-  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) {
-    const d = new Date(`${iso[1]}-${iso[2]}-${iso[3]}T00:00:00`);
-    return isNaN(d) ? null : d;
-  }
-
-  // If it's MM/DD/YYYY or M/D/YYYY
-  const us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
-  if (us) {
-    const mm = Number(us[1]);
-    const dd = Number(us[2]);
-    let yyyy = Number(us[3]);
-    if (yyyy < 100) yyyy += 2000;
-    const d = new Date(yyyy, mm - 1, dd);
-    return isNaN(d) ? null : d;
-  }
-
-  // Last resort
-  const d = new Date(s);
-  return isNaN(d) ? null : d;
-}
-
-function toUSDate(d) {
-  if (!d) return "";
-  return fmtUS.format(d); // MM/DD/YYYY
-}
-
-function toISODateOnly(d) {
-  if (!d) return "";
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-function clampDateRange(d, from, to) {
-  if (!d) return false;
-  if (from && d < from) return false;
-  if (to) {
-    const end = new Date(to.getFullYear(), to.getMonth(), to.getDate(), 23, 59, 59, 999);
-    if (d > end) return false;
-  }
-  return true;
-}
-
-// CSV parsing (handles quotes/commas reasonably well)
-function parseCSV(text) {
-  const rows = [];
-  let row = [];
-  let cur = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    const next = text[i + 1];
-
-    if (ch === '"' && inQuotes && next === '"') {
-      cur += '"';
-      i++;
-      continue;
-    }
-    if (ch === '"') {
-      inQuotes = !inQuotes;
-      continue;
-    }
-    if (!inQuotes && (ch === ",")) {
-      row.push(cur);
-      cur = "";
-      continue;
-    }
-    if (!inQuotes && (ch === "\n")) {
-      row.push(cur);
-      rows.push(row);
-      row = [];
-      cur = "";
-      continue;
-    }
-    if (!inQuotes && ch === "\r") continue;
-
-    cur += ch;
-  }
-  row.push(cur);
-  rows.push(row);
-
-  // Remove blank trailing lines
-  while (rows.length && rows[rows.length - 1].every(x => String(x).trim() === "")) rows.pop();
-
-  const headers = rows[0] || [];
-  const dataRows = rows.slice(1);
-
-  const objs = dataRows.map(r => {
-    const o = {};
-    headers.forEach((h, idx) => o[h] = r[idx] ?? "");
-    return o;
-  });
-
-  return { headers, rows: objs };
-}
-
-// App state
-let allRows = [];
-let filteredRows = [];
-let headerMap = {};
-let columnOrder = loadColumnOrder();
-
-let sortState = { key: null, dir: "asc" }; // asc/desc
-
-// Elements
-const el = {
-  fileInput: document.getElementById("fileInput"),
-  fileStatus: document.getElementById("fileStatus"),
-  resetLayoutBtn: document.getElementById("resetLayoutBtn"),
-
-  keywordInput: document.getElementById("keywordInput"),
-  assignedSelect: document.getElementById("assignedSelect"),
-  statusSelect: document.getElementById("statusSelect"),
-  typeSelect: document.getElementById("typeSelect"),
-  deptSelect: document.getElementById("deptSelect"),
-  dateFrom: document.getElementById("dateFrom"),
-  dateTo: document.getElementById("dateTo"),
-  hideUnassigned: document.getElementById("hideUnassigned"),
-  useCurrentFiltersForCounts: document.getElementById("useCurrentFiltersForCounts"),
-
-  rowCount: document.getElementById("rowCount"),
-  dataTable: document.getElementById("dataTable"),
-  summaryTable: document.getElementById("summaryTable"),
-  exportSummaryBtn: document.getElementById("exportSummaryBtn"),
+// ====== Storage Keys ======
+const STORAGE = {
+  tabulatorPersistenceID: "wo_viewer_tabulator_v1",
+  sidePanelHidden: "wo_viewer_side_hidden_v1",
+  sidePanelWidth: "wo_viewer_side_width_v1",
+  lastDateField: "wo_viewer_date_field_v1",
 };
 
-// Init
-wireEvents();
-renderEmpty();
+// ====== Column mapping ======
+// We normalize incoming headers and map them to our internal field names.
+const WANTED_COLUMNS = [
+  { field: "work_order", title: "Work Order" },
+  { field: "description", title: "Description" },
+  { field: "status", title: "Status" },
+  { field: "type", title: "Type" },
+  { field: "department", title: "Department" },
+  { field: "equipment", title: "Equipment" },
+  { field: "equipment_description", title: "Equipment Description" },
+  { field: "sched_start", title: "Sched. Start Date" },
+  { field: "orig_due", title: "Original PM Due Date" },
+  { field: "sched_end", title: "Sched. End Date" },
+  { field: "assigned_to", title: "Assigned To" },
+];
 
-function wireEvents() {
-  el.fileInput.addEventListener("change", onFileChosen);
-  el.resetLayoutBtn.addEventListener("click", () => {
-    localStorage.removeItem(STORAGE_KEY);
-    columnOrder = loadColumnOrder(true);
-    renderAll();
+// Synonyms you might see in exports (case/spacing/punctuation varies)
+const HEADER_SYNONYMS = new Map([
+  // Work Order
+  ["workorder", "work_order"],
+  ["work_order", "work_order"],
+  ["wo", "work_order"],
+  ["work order", "work_order"],
+
+  // Description
+  ["description", "description"],
+  ["wo description", "description"],
+
+  // Status / Type / Dept
+  ["status", "status"],
+  ["type", "type"],
+  ["department", "department"],
+
+  // Equipment
+  ["equipment", "equipment"],
+  ["equipmentid", "equipment"],
+  ["equipment id", "equipment"],
+
+  ["equipmentdescription", "equipment_description"],
+  ["equipment description", "equipment_description"],
+
+  // Dates
+  ["sched. start date", "sched_start"],
+  ["sched start date", "sched_start"],
+  ["scheduled start date", "sched_start"],
+  ["scheduled start", "sched_start"],
+  ["sched_start", "sched_start"],
+
+  ["original pm due date", "orig_due"],
+  ["original pm due", "orig_due"],
+  ["pm due date", "orig_due"],
+  ["orig_due", "orig_due"],
+
+  ["sched. end date", "sched_end"],
+  ["sched end date", "sched_end"],
+  ["scheduled end date", "sched_end"],
+  ["scheduled end", "sched_end"],
+  ["sched_end", "sched_end"],
+
+  // Assigned To
+  ["assigned to", "assigned_to"],
+  ["assignedto", "assigned_to"],
+  ["assigned_to", "assigned_to"],
+  ["assignee", "assigned_to"],
+]);
+
+// ====== DOM ======
+const el = {
+  fileInput: document.getElementById("fileInput"),
+  clearBtn: document.getElementById("clearBtn"),
+  resetLayoutBtn: document.getElementById("resetLayoutBtn"),
+  statusMsg: document.getElementById("statusMsg"),
+
+  searchInput: document.getElementById("searchInput"),
+  dateField: document.getElementById("dateField"),
+  dateFrom: document.getElementById("dateFrom"),
+  dateTo: document.getElementById("dateTo"),
+  assigneeFilter: document.getElementById("assigneeFilter"),
+
+  table: document.getElementById("table"),
+  sidePanel: document.getElementById("sidePanel"),
+  toggleSideBtn: document.getElementById("toggleSideBtn"),
+  divider: document.getElementById("divider"),
+
+  countsSub: document.getElementById("countsSub"),
+  countsMeta: document.getElementById("countsMeta"),
+  countsList: document.getElementById("countsList"),
+};
+
+// ====== State ======
+let table = null;
+let rawRows = [];   // normalized rows (only wanted fields)
+let filteredRows = []; // based on Tabulator current filters
+
+// ====== Helpers ======
+function setStatus(msg, isError = false) {
+  el.statusMsg.textContent = msg || "";
+  el.statusMsg.style.color = isError ? "#ff9aa0" : "";
+}
+
+function normalizeHeader(h) {
+  return String(h ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\uFEFF/g, "")           // strip BOM
+    .replace(/[_\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[.]/g, ".")            // keep dots (we also match without)
+    .trim();
+}
+
+function headerToField(header) {
+  const h = normalizeHeader(header);
+  const hNoDots = h.replace(/[.]/g, "");
+  const direct = HEADER_SYNONYMS.get(h);
+  if (direct) return direct;
+  const noDots = HEADER_SYNONYMS.get(hNoDots);
+  if (noDots) return noDots;
+  return null;
+}
+
+function toISODateMaybe(value) {
+  // Returns ISO yyyy-MM-dd or "" if not parseable.
+  if (value === null || value === undefined || value === "") return "";
+
+  // If SheetJS gives a Date object:
+  if (value instanceof Date && !isNaN(value.valueOf())) {
+    return DateTime.fromJSDate(value).toISODate();
+  }
+
+  // If SheetJS gives number (Excel serial date):
+  if (typeof value === "number" && isFinite(value)) {
+    // Excel date serial: use SheetJS to parse by converting to JS date
+    // But safer: DateTime from Excel epoch (1899-12-30)
+    const dt = DateTime.fromISO("1899-12-30").plus({ days: Math.floor(value) });
+    return dt.isValid ? dt.toISODate() : "";
+  }
+
+  const s = String(value).trim();
+  if (!s) return "";
+
+  // Common formats
+  const candidates = [
+    DateTime.fromFormat(s, "M/d/yyyy"),
+    DateTime.fromFormat(s, "MM/dd/yyyy"),
+    DateTime.fromFormat(s, "M/d/yy"),
+    DateTime.fromFormat(s, "MM/dd/yy"),
+    DateTime.fromISO(s),
+    DateTime.fromRFC2822(s),
+  ];
+
+  for (const c of candidates) {
+    if (c.isValid) return c.toISODate();
+  }
+
+  // Try Luxon auto parse (last resort)
+  const auto = DateTime.fromJSDate(new Date(s));
+  if (auto.isValid) return auto.toISODate();
+
+  return "";
+}
+
+function formatMMDDYYYYFromISO(iso) {
+  if (!iso) return "";
+  const dt = DateTime.fromISO(iso);
+  return dt.isValid ? dt.toFormat("MM/dd/yyyy") : "";
+}
+
+function uniqSorted(arr) {
+  return Array.from(new Set(arr)).filter(Boolean).sort((a, b) => a.localeCompare(b));
+}
+
+// ====== Build Tabulator ======
+function buildTable() {
+  const columns = WANTED_COLUMNS.map(col => {
+    const isDate = ["sched_start", "orig_due", "sched_end"].includes(col.field);
+
+    return {
+      title: col.title,
+      field: col.field,
+      headerFilter: true,
+      headerFilterPlaceholder: "filter…",
+      widthGrow: col.field === "description" ? 3 : 1,
+      formatter: isDate ? (cell) => {
+        const iso = cell.getValue();
+        return formatMMDDYYYYFromISO(iso);
+      } : undefined,
+      sorter: isDate ? (a, b) => (a || "").localeCompare(b || "") : "string",
+    };
   });
 
-  const filterInputs = [
-    el.keywordInput, el.assignedSelect, el.statusSelect, el.typeSelect, el.deptSelect,
-    el.dateFrom, el.dateTo, el.hideUnassigned, el.useCurrentFiltersForCounts
-  ];
-  filterInputs.forEach(x => x.addEventListener("input", applyFilters));
-  filterInputs.forEach(x => x.addEventListener("change", applyFilters));
+  table = new Tabulator("#table", {
+    data: [],
+    columns,
+    layout: "fitColumns",
+    height: "100%",
 
-  el.exportSummaryBtn.addEventListener("click", exportSummaryCSV);
+    movableColumns: true,
+
+    persistence: {
+      sort: true,
+      filter: true,
+      columns: true,
+    },
+    persistenceID: STORAGE.tabulatorPersistenceID,
+    persistenceMode: "local",
+
+    placeholder: "Upload a CSV or XLSX to begin.",
+    reactiveData: false,
+
+    // Keep counts synced when the table changes
+    dataFiltered: function(filters, rows) {
+      filteredRows = rows.map(r => r.getData());
+      refreshCounts(filteredRows);
+      refreshAssigneeDropdown(filteredRows);
+    },
+  });
 }
 
-function loadColumnOrder(forceDefault = false) {
-  if (forceDefault) return WANTED.map(x => x.key);
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return WANTED.map(x => x.key);
-    const parsed = JSON.parse(raw);
-    // keep only known keys, and append any missing
-    const known = new Set(WANTED.map(x => x.key));
-    const cleaned = parsed.filter(k => known.has(k));
-    for (const k of WANTED.map(x => x.key)) if (!cleaned.includes(k)) cleaned.push(k);
-    return cleaned;
-  } catch {
-    return WANTED.map(x => x.key);
+function resetColumnLayout() {
+  // Clear Tabulator persistence only (leaves other app storage alone)
+  const prefix = "tabulator-" + STORAGE.tabulatorPersistenceID;
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith(prefix)) localStorage.removeItem(k);
   }
+  setStatus("Saved column layout cleared. Refreshing…");
+  // Rebuild table to apply reset
+  table?.destroy();
+  buildTable();
+  if (rawRows.length) table.setData(rawRows);
 }
 
-function saveColumnOrder() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(columnOrder));
-}
-
-async function onFileChosen(e) {
-  const file = e.target.files?.[0];
+// ====== File parsing ======
+async function handleFile(file) {
+  setStatus("");
   if (!file) return;
 
-  el.fileStatus.textContent = `Loading: ${file.name}...`;
+  const name = file.name.toLowerCase();
 
   try {
-    const ext = file.name.toLowerCase().split(".").pop();
-    if (ext === "csv") {
+    if (name.endsWith(".csv")) {
       const text = await file.text();
-      const parsed = parseCSV(text);
-      setData(parsed.headers, parsed.rows, file.name);
-    } else if (ext === "xlsx" || ext === "xls") {
-      if (!window.XLSX) throw new Error("XLSX library not loaded.");
+      const parsed = Papa.parse(text, {
+        header: true,
+        skipEmptyLines: true,
+        dynamicTyping: false,
+        // auto delimiter detect usually works; still accepts comma/semicolon
+      });
+
+      if (parsed.errors?.length) {
+        console.warn(parsed.errors);
+        setStatus("CSV parsed with warnings. If data is missing, check delimiter/headers.", true);
+      }
+
+      const normalized = normalizeRowsFromObjects(parsed.data);
+      loadData(normalized, file.name);
+      return;
+    }
+
+    if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf, { type: "array" });
-      const firstSheet = wb.SheetNames[0];
-      const ws = wb.Sheets[firstSheet];
-      const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
-      const headers = json.length ? Object.keys(json[0]) : [];
-      setData(headers, json, file.name);
-    } else {
-      throw new Error("Unsupported file type. Please upload a .csv or .xlsx.");
+      const first = wb.SheetNames[0];
+      const ws = wb.Sheets[first];
+
+      // sheet_to_json with raw false helps get readable values
+      const json = XLSX.utils.sheet_to_json(ws, { defval: "", raw: true });
+      const normalized = normalizeRowsFromObjects(json);
+      loadData(normalized, file.name);
+      return;
     }
+
+    setStatus("Unsupported file type. Please upload a .csv, .xlsx, or .xls", true);
   } catch (err) {
     console.error(err);
-    el.fileStatus.textContent = `Error: ${err.message}`;
-    allRows = [];
-    filteredRows = [];
-    renderAll();
-  } finally {
-    el.fileInput.value = "";
+    setStatus("Failed to read file: " + (err?.message || String(err)), true);
   }
 }
 
-function setData(headers, rows, filename) {
-  headerMap = makeHeaderMap(headers);
+function normalizeRowsFromObjects(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
 
-  // Keep only desired columns (mapped)
-  allRows = rows.map(r => {
-    const o = {};
-    for (const col of WANTED) {
-      const src = headerMap[col.key];
-      o[col.key] = src ? r[src] : "";
+  // Build a mapping from incoming headers -> our internal fields
+  const sample = rows[0];
+  const incomingHeaders = Object.keys(sample);
+
+  const headerMap = new Map(); // incoming header -> internal field
+  for (const h of incomingHeaders) {
+    const field = headerToField(h);
+    if (field) headerMap.set(h, field);
+  }
+
+  // If we didn't match anything, show a better error
+  const matchedFields = new Set(Array.from(headerMap.values()));
+  if (matchedFields.size === 0) {
+    setStatus(
+      "No recognizable headers found. Make sure your export includes columns like 'Work Order', 'Sched. Start Date', 'Assigned To', etc.",
+      true
+    );
+  }
+
+  // Normalize each row into only wanted columns
+  const normalized = rows.map((r) => {
+    const out = {};
+    for (const col of WANTED_COLUMNS) out[col.field] = "";
+
+    for (const [incomingHeader, internalField] of headerMap.entries()) {
+      let v = r[incomingHeader];
+
+      // Date fields -> ISO for filtering/sorting, display as MM/DD/YYYY
+      if (["sched_start", "orig_due", "sched_end"].includes(internalField)) {
+        out[internalField] = toISODateMaybe(v);
+      } else {
+        out[internalField] = String(v ?? "").trim();
+      }
     }
-
-    // Parse/normalize date fields so filtering + display are consistent
-    o.sched_start_date__d = parseDateLoose(o.sched_start_date);
-    o.original_pm_due_date__d = parseDateLoose(o.original_pm_due_date);
-    o.sched_end_date__d = parseDateLoose(o.sched_end_date);
-
-    // Clean some common string fields
-    o.assigned_to = String(o.assigned_to ?? "").trim();
-    o.status = String(o.status ?? "").trim();
-    o.type = String(o.type ?? "").trim();
-    o.department = String(o.department ?? "").trim();
-
-    return o;
+    return out;
   });
 
-  el.fileStatus.textContent = `Loaded: ${filename} (${allRows.length} rows)`;
-
-  // Populate filter dropdowns from data
-  populateSelect(el.assignedSelect, uniqueNonEmpty(allRows.map(r => r.assigned_to)));
-  populateSelect(el.statusSelect, uniqueNonEmpty(allRows.map(r => r.status)));
-  populateSelect(el.typeSelect, uniqueNonEmpty(allRows.map(r => r.type)));
-  populateSelect(el.deptSelect, uniqueNonEmpty(allRows.map(r => r.department)));
-
-  // Set date pickers to min/max of scheduled start date if available
-  const schedDates = allRows.map(r => r.sched_start_date__d).filter(Boolean).sort((a,b)=>a-b);
-  if (schedDates.length) {
-    el.dateFrom.value = toISODateOnly(schedDates[0]);
-    el.dateTo.value = toISODateOnly(schedDates[schedDates.length - 1]);
-  } else {
-    el.dateFrom.value = "";
-    el.dateTo.value = "";
-  }
-
-  // Reset sort
-  sortState = { key: null, dir: "asc" };
-
-  applyFilters();
-}
-
-function uniqueNonEmpty(arr) {
-  const set = new Set();
-  for (const v of arr) {
-    const s = String(v ?? "").trim();
-    if (s) set.add(s);
-  }
-  return Array.from(set).sort((a,b)=>a.localeCompare(b));
-}
-
-function populateSelect(selectEl, values) {
-  const keepFirst = selectEl.options[0];
-  selectEl.innerHTML = "";
-  selectEl.appendChild(keepFirst);
-  for (const v of values) {
-    const opt = document.createElement("option");
-    opt.value = v;
-    opt.textContent = v;
-    selectEl.appendChild(opt);
-  }
-}
-
-function applyFilters() {
-  const kw = el.keywordInput.value.trim().toLowerCase();
-  const assigned = el.assignedSelect.value;
-  const status = el.statusSelect.value;
-  const type = el.typeSelect.value;
-  const dept = el.deptSelect.value;
-  const hideUnassigned = el.hideUnassigned.checked;
-
-  const from = el.dateFrom.value ? new Date(el.dateFrom.value + "T00:00:00") : null;
-  const to = el.dateTo.value ? new Date(el.dateTo.value + "T00:00:00") : null;
-
-  filteredRows = allRows.filter(r => {
-    if (assigned && r.assigned_to !== assigned) return false;
-    if (status && r.status !== status) return false;
-    if (type && r.type !== type) return false;
-    if (dept && r.department !== dept) return false;
-    if (hideUnassigned && !r.assigned_to) return false;
-
-    // Date filter uses Scheduled start date
-    if ((from || to) && !clampDateRange(r.sched_start_date__d, from, to)) return false;
-
-    if (kw) {
-      const hay = [
-        r.work_order, r.description, r.status, r.type, r.department,
-        r.equipment, r.equipment_description, r.assigned_to
-      ].map(x => String(x ?? "").toLowerCase()).join(" | ");
-      if (!hay.includes(kw)) return false;
-    }
-    return true;
-  });
-
-  // Apply sorting (if set)
-  if (sortState.key) sortRows(filteredRows, sortState.key, sortState.dir);
-
-  renderAll();
-}
-
-function sortRows(rows, key, dir) {
-  const mul = dir === "asc" ? 1 : -1;
-  rows.sort((a,b) => {
-    // date keys
-    if (key === "sched_start_date") return mul * cmpDate(a.sched_start_date__d, b.sched_start_date__d);
-    if (key === "original_pm_due_date") return mul * cmpDate(a.original_pm_due_date__d, b.original_pm_due_date__d);
-    if (key === "sched_end_date") return mul * cmpDate(a.sched_end_date__d, b.sched_end_date__d);
-
-    const av = String(a[key] ?? "");
-    const bv = String(b[key] ?? "");
-    // numeric-ish
-    const an = Number(av);
-    const bn = Number(bv);
-    if (av !== "" && bv !== "" && isFinite(an) && isFinite(bn)) return mul * (an - bn);
-
-    return mul * av.localeCompare(bv, undefined, { numeric: true, sensitivity: "base" });
+  // Remove completely empty rows (common in exports)
+  return normalized.filter(r => {
+    return (r.work_order || r.description || r.equipment || r.assigned_to ||
+      r.sched_start || r.orig_due || r.sched_end);
   });
 }
 
-function cmpDate(a, b) {
-  const ta = a ? a.getTime() : -Infinity;
-  const tb = b ? b.getTime() : -Infinity;
-  return ta - tb;
-}
-
-function renderAll() {
-  el.rowCount.textContent = String(filteredRows.length);
-
-  renderTable();
-  renderSummary();
-}
-
-function renderEmpty() {
-  el.dataTable.querySelector("thead").innerHTML = "";
-  el.dataTable.querySelector("tbody").innerHTML = "";
-  el.summaryTable.querySelector("thead").innerHTML = "";
-  el.summaryTable.querySelector("tbody").innerHTML = "";
-  el.rowCount.textContent = "0";
-}
-
-function renderTable() {
-  const thead = el.dataTable.querySelector("thead");
-  const tbody = el.dataTable.querySelector("tbody");
-
-  // header
-  const tr = document.createElement("tr");
-  for (const key of columnOrder) {
-    const col = WANTED.find(c => c.key === key);
-    const th = document.createElement("th");
-    th.dataset.key = key;
-    th.draggable = true;
-
-    const inner = document.createElement("div");
-    inner.className = "th-inner";
-
-    const handle = document.createElement("span");
-    handle.className = "th-handle";
-    handle.title = "Drag to reorder";
-
-    const title = document.createElement("span");
-    title.className = "th-title";
-    title.textContent = col?.label ?? key;
-
-    const sort = document.createElement("span");
-    sort.className = "th-sort";
-    if (sortState.key === key) sort.textContent = sortState.dir === "asc" ? "▲" : "▼";
-    else sort.textContent = "";
-
-    inner.appendChild(handle);
-    inner.appendChild(title);
-    inner.appendChild(sort);
-    th.appendChild(inner);
-
-    // click to sort
-    th.addEventListener("click", (ev) => {
-      // if they are dragging, ignore
-      if (th.classList.contains("dragging")) return;
-      toggleSort(key);
-    });
-
-    // drag events
-    th.addEventListener("dragstart", onDragStart);
-    th.addEventListener("dragover", onDragOver);
-    th.addEventListener("drop", onDrop);
-    th.addEventListener("dragend", onDragEnd);
-
-    tr.appendChild(th);
-  }
-  thead.innerHTML = "";
-  thead.appendChild(tr);
-
-  // body
-  const frag = document.createDocumentFragment();
-  for (const r of filteredRows) {
-    const rowEl = document.createElement("tr");
-    for (const key of columnOrder) {
-      const td = document.createElement("td");
-      td.appendChild(renderCell(r, key));
-      rowEl.appendChild(td);
-    }
-    frag.appendChild(rowEl);
-  }
-  tbody.innerHTML = "";
-  tbody.appendChild(frag);
-}
-
-function renderCell(r, key) {
-  // date display in MM/DD/YYYY
-  if (key === "sched_start_date") return textNode(toUSDate(r.sched_start_date__d));
-  if (key === "original_pm_due_date") return textNode(toUSDate(r.original_pm_due_date__d));
-  if (key === "sched_end_date") return textNode(toUSDate(r.sched_end_date__d));
-
-  const v = String(r[key] ?? "").trim();
-
-  if (key === "status" && v) {
-    const s = document.createElement("span");
-    s.className = "cell-badge";
-    s.textContent = v;
-    return s;
-  }
-  if (!v) {
-    const s = document.createElement("span");
-    s.className = "cell-muted";
-    s.textContent = "—";
-    return s;
-  }
-  return textNode(v);
-}
-
-function textNode(s) {
-  return document.createTextNode(s);
-}
-
-function toggleSort(key) {
-  if (sortState.key !== key) {
-    sortState = { key, dir: "asc" };
-  } else {
-    sortState.dir = sortState.dir === "asc" ? "desc" : "asc";
-  }
-  sortRows(filteredRows, sortState.key, sortState.dir);
-  renderAll();
-}
-
-// Drag-to-reorder headers
-let dragKey = null;
-
-function onDragStart(e) {
-  dragKey = e.currentTarget.dataset.key;
-  e.currentTarget.classList.add("dragging");
-  e.dataTransfer.effectAllowed = "move";
-  e.dataTransfer.setData("text/plain", dragKey);
-}
-
-function onDragOver(e) {
-  e.preventDefault();
-  e.dataTransfer.dropEffect = "move";
-}
-
-function onDrop(e) {
-  e.preventDefault();
-  const fromKey = e.dataTransfer.getData("text/plain");
-  const toKey = e.currentTarget.dataset.key;
-  if (!fromKey || !toKey || fromKey === toKey) return;
-
-  const fromIdx = columnOrder.indexOf(fromKey);
-  const toIdx = columnOrder.indexOf(toKey);
-  if (fromIdx === -1 || toIdx === -1) return;
-
-  columnOrder.splice(fromIdx, 1);
-  columnOrder.splice(toIdx, 0, fromKey);
-
-  saveColumnOrder();
-  renderAll();
-}
-
-function onDragEnd(e) {
-  e.currentTarget.classList.remove("dragging");
-  dragKey = null;
-}
-
-// Summary pivot: counts per employee per day (Sched. Start Date + Assigned To)
-function renderSummary() {
-  const useFiltered = el.useCurrentFiltersForCounts.checked;
-  const base = useFiltered ? filteredRows : allRows;
-
-  const byDay = new Map(); // dayKey -> Map(employee -> count)
-  const employees = new Set();
-
-  for (const r of base) {
-    const d = r.sched_start_date__d;
-    if (!d) continue;
-    const dayKey = toUSDate(d); // MM/DD/YYYY
-    const emp = (r.assigned_to || "").trim() || "(Unassigned)";
-    employees.add(emp);
-
-    if (!byDay.has(dayKey)) byDay.set(dayKey, new Map());
-    const m = byDay.get(dayKey);
-    m.set(emp, (m.get(emp) || 0) + 1);
-  }
-
-  const days = Array.from(byDay.keys()).sort((a,b)=> {
-    // sort by real date
-    const da = parseDateLoose(a);
-    const db = parseDateLoose(b);
-    return (da?.getTime() ?? 0) - (db?.getTime() ?? 0);
-  });
-  const emps = Array.from(employees).sort((a,b)=>a.localeCompare(b));
-
-  const thead = el.summaryTable.querySelector("thead");
-  const tbody = el.summaryTable.querySelector("tbody");
-
-  // Build header
-  const trh = document.createElement("tr");
-  trh.appendChild(thText("Date"));
-  for (const emp of emps) trh.appendChild(thText(emp));
-  trh.appendChild(thText("Total"));
-  thead.innerHTML = "";
-  thead.appendChild(trh);
-
-  // Build rows
-  const frag = document.createDocumentFragment();
-  for (const day of days) {
-    const tr = document.createElement("tr");
-    tr.appendChild(tdText(day));
-
-    const m = byDay.get(day);
-    let total = 0;
-
-    for (const emp of emps) {
-      const c = m?.get(emp) || 0;
-      total += c;
-      tr.appendChild(tdText(c ? String(c) : "0"));
-    }
-    tr.appendChild(tdText(String(total)));
-    frag.appendChild(tr);
-  }
-
-  // If no data
-  if (!days.length) {
-    const tr = document.createElement("tr");
-    const td = document.createElement("td");
-    td.colSpan = Math.max(2, emps.length + 2);
-    td.className = "cell-muted";
-    td.style.padding = "14px";
-    td.textContent = "No scheduled start dates found to summarize (or filters removed everything).";
-    tr.appendChild(td);
-    tbody.innerHTML = "";
-    tbody.appendChild(tr);
+function loadData(rows, filename) {
+  rawRows = rows || [];
+  if (!rawRows.length) {
+    table.setData([]);
+    refreshCounts([]);
+    refreshAssigneeDropdown([]);
+    setStatus("Loaded file, but no rows matched your selected columns. Check the headers/export.", true);
     return;
   }
 
-  tbody.innerHTML = "";
-  tbody.appendChild(frag);
+  table.setData(rawRows);
+  setStatus(`Loaded ${rawRows.length} rows from ${filename}`);
+
+  // After data loads, apply current UI filters
+  applyFiltersFromUI();
 }
 
-function thText(s) {
-  const th = document.createElement("th");
-  th.textContent = s;
-  return th;
-}
-function tdText(s) {
-  const td = document.createElement("td");
-  td.textContent = s;
-  return td;
-}
+// ====== Filtering ======
+function applyFiltersFromUI() {
+  if (!table) return;
 
-function exportSummaryCSV() {
-  // export what summary currently shows
-  const table = el.summaryTable;
-  const rows = Array.from(table.querySelectorAll("tr"));
-  if (!rows.length) return;
+  const q = el.searchInput.value.trim().toLowerCase();
+  const assignee = el.assigneeFilter.value;
+  const dateField = el.dateField.value; // sched_start | orig_due | sched_end
+  const from = el.dateFrom.value ? DateTime.fromISO(el.dateFrom.value).toISODate() : "";
+  const to = el.dateTo.value ? DateTime.fromISO(el.dateTo.value).toISODate() : "";
 
-  const lines = rows.map(tr => {
-    const cells = Array.from(tr.children).map(cell => {
-      const v = cell.textContent ?? "";
-      // CSV escape
-      const needs = /[",\n]/.test(v);
-      const escaped = v.replace(/"/g, '""');
-      return needs ? `"${escaped}"` : escaped;
+  // Clear all filters first
+  table.clearFilter(true);
+
+  // Global search (custom filter across fields)
+  if (q) {
+    table.addFilter((data) => {
+      const hay = [
+        data.work_order,
+        data.description,
+        data.status,
+        data.type,
+        data.department,
+        data.equipment,
+        data.equipment_description,
+        data.assigned_to,
+        formatMMDDYYYYFromISO(data.sched_start),
+        formatMMDDYYYYFromISO(data.orig_due),
+        formatMMDDYYYYFromISO(data.sched_end),
+      ].join(" ").toLowerCase();
+
+      return hay.includes(q);
     });
-    return cells.join(",");
+  }
+
+  if (assignee) {
+    table.addFilter("assigned_to", "=", assignee);
+  }
+
+  if (from || to) {
+    table.addFilter((data) => {
+      const d = data[dateField] || "";
+      if (!d) return false;
+      if (from && d < from) return false;
+      if (to && d > to) return false;
+      return true;
+    });
+  }
+
+  // save preferred date field
+  localStorage.setItem(STORAGE.lastDateField, dateField);
+
+  // Trigger Tabulator to recompute filteredRows (counts update in dataFiltered callback)
+  table.redraw(true);
+}
+
+// ====== Counts (employee x day) ======
+function refreshCounts(rows) {
+  const dateField = el.dateField.value;
+  const total = rows.length;
+
+  // Build counts[assignee][date] = n
+  const counts = new Map();
+
+  for (const r of rows) {
+    const who = (r.assigned_to || "").trim() || "(Unassigned)";
+    const iso = (r[dateField] || "").trim();
+    if (!iso) continue;
+
+    if (!counts.has(who)) counts.set(who, new Map());
+    const map = counts.get(who);
+    map.set(iso, (map.get(iso) || 0) + 1);
+  }
+
+  // Render
+  const people = Array.from(counts.keys()).sort((a, b) => a.localeCompare(b));
+  const dateFrom = el.dateFrom.value ? DateTime.fromISO(el.dateFrom.value).toFormat("MM/dd/yyyy") : "—";
+  const dateTo = el.dateTo.value ? DateTime.fromISO(el.dateTo.value).toFormat("MM/dd/yyyy") : "—";
+
+  el.countsMeta.textContent =
+    `Rows shown: ${total}\n` +
+    `Counting by: ${labelForDateField(dateField)}\n` +
+    `Range: ${dateFrom} → ${dateTo}`;
+
+  el.countsList.innerHTML = "";
+
+  if (people.length === 0) {
+    el.countsList.innerHTML = `<div class="countRow"><div class="countName">No dated rows to count</div></div>`;
+    return;
+  }
+
+  for (const person of people) {
+    const dateMap = counts.get(person);
+    const dates = Array.from(dateMap.keys()).sort((a, b) => a.localeCompare(b));
+    const totalForPerson = dates.reduce((sum, d) => sum + (dateMap.get(d) || 0), 0);
+
+    const row = document.createElement("div");
+    row.className = "countRow";
+
+    const top = document.createElement("div");
+    top.className = "countRowTop";
+
+    const name = document.createElement("div");
+    name.className = "countName";
+    name.textContent = person;
+
+    const totalEl = document.createElement("div");
+    totalEl.className = "countTotal";
+    totalEl.textContent = totalForPerson;
+
+    top.appendChild(name);
+    top.appendChild(totalEl);
+
+    const datesWrap = document.createElement("div");
+    datesWrap.className = "countDates";
+
+    for (const iso of dates) {
+      const pill = document.createElement("div");
+      pill.className = "datePill";
+
+      const d = document.createElement("div");
+      d.className = "d";
+      d.textContent = formatMMDDYYYYFromISO(iso);
+
+      const n = document.createElement("div");
+      n.className = "n";
+      n.textContent = dateMap.get(iso);
+
+      pill.appendChild(d);
+      pill.appendChild(n);
+      datesWrap.appendChild(pill);
+    }
+
+    row.appendChild(top);
+    row.appendChild(datesWrap);
+    el.countsList.appendChild(row);
+  }
+}
+
+function labelForDateField(v) {
+  if (v === "sched_start") return "Sched. Start Date";
+  if (v === "orig_due") return "Original PM Due Date";
+  if (v === "sched_end") return "Sched. End Date";
+  return v;
+}
+
+// ====== Assignee dropdown ======
+function refreshAssigneeDropdown(rows) {
+  const names = uniqSorted(rows.map(r => (r.assigned_to || "").trim()).filter(Boolean));
+
+  // keep selection if possible
+  const current = el.assigneeFilter.value;
+
+  el.assigneeFilter.innerHTML = `<option value="">All</option>` + names.map(n => {
+    const safe = n.replace(/"/g, "&quot;");
+    return `<option value="${safe}">${n}</option>`;
+  }).join("");
+
+  if (current && names.includes(current)) {
+    el.assigneeFilter.value = current;
+  } else {
+    el.assigneeFilter.value = "";
+  }
+}
+
+// ====== Side panel toggle + resizing ======
+function setSideHidden(hidden) {
+  el.sidePanel.classList.toggle("hidden", hidden);
+  localStorage.setItem(STORAGE.sidePanelHidden, hidden ? "1" : "0");
+}
+
+function loadSidePrefs() {
+  const hidden = localStorage.getItem(STORAGE.sidePanelHidden) === "1";
+  setSideHidden(hidden);
+
+  const width = parseInt(localStorage.getItem(STORAGE.sidePanelWidth) || "", 10);
+  if (Number.isFinite(width) && width >= 260 && width <= window.innerWidth * 0.55) {
+    el.sidePanel.style.width = width + "px";
+  }
+}
+
+function initDividerDrag() {
+  let dragging = false;
+
+  el.divider.addEventListener("mousedown", () => {
+    dragging = true;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
   });
 
-  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    const w = parseInt(getComputedStyle(el.sidePanel).width, 10);
+    if (Number.isFinite(w)) localStorage.setItem(STORAGE.sidePanelWidth, String(w));
+  });
 
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "workorder_summary_counts.csv";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    if (el.sidePanel.classList.contains("hidden")) return;
+
+    // Set side panel width based on mouse X from right edge
+    const viewportW = window.innerWidth;
+    const newW = Math.min(Math.max(viewportW - e.clientX, 260), viewportW * 0.55);
+    el.sidePanel.style.width = newW + "px";
+    table?.redraw(true);
+  });
 }
+
+// ====== Events ======
+function wireEvents() {
+  el.fileInput.addEventListener("change", (e) => {
+    const file = e.target.files?.[0];
+    handleFile(file);
+    // allow re-upload same file by clearing value
+    e.target.value = "";
+  });
+
+  el.clearBtn.addEventListener("click", () => {
+    rawRows = [];
+    filteredRows = [];
+    table.setData([]);
+    refreshCounts([]);
+    refreshAssigneeDropdown([]);
+    setStatus("Cleared.");
+  });
+
+  el.resetLayoutBtn.addEventListener("click", resetColumnLayout);
+
+  el.searchInput.addEventListener("input", debounce(applyFiltersFromUI, 150));
+  el.assigneeFilter.addEventListener("change", applyFiltersFromUI);
+  el.dateFrom.addEventListener("change", applyFiltersFromUI);
+  el.dateTo.addEventListener("change", applyFiltersFromUI);
+  el.dateField.addEventListener("change", () => {
+    applyFiltersFromUI();
+    // counts refresh happens via dataFiltered, but if same filtered set, force refresh:
+    refreshCounts(filteredRows);
+  });
+
+  el.toggleSideBtn.addEventListener("click", () => {
+    const hidden = el.sidePanel.classList.contains("hidden");
+    setSideHidden(!hidden);
+    table?.redraw(true);
+  });
+}
+
+function debounce(fn, wait) {
+  let t = null;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), wait);
+  };
+}
+
+// ====== Init ======
+function initDefaults() {
+  // Default date field preference
+  const savedDateField = localStorage.getItem(STORAGE.lastDateField);
+  if (savedDateField && ["sched_start","orig_due","sched_end"].includes(savedDateField)) {
+    el.dateField.value = savedDateField;
+  } else {
+    el.dateField.value = "sched_start";
+  }
+
+  // Optional: default date range to today..today+7? (leave empty unless you want it)
+  // el.dateFrom.value = DateTime.now().toISODate();
+  // el.dateTo.value = DateTime.now().plus({days:7}).toISODate();
+
+  loadSidePrefs();
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  buildTable();
+  wireEvents();
+  initDefaults();
+  initDividerDrag();
+  setStatus("Upload a CSV or XLSX to load work orders.");
+});

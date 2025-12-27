@@ -1,0 +1,264 @@
+:root {
+  --bg: #0b0f14;
+  --panel: #111826;
+  --panel2: #0f1723;
+  --text: #e6eefc;
+  --muted: #9fb0cc;
+  --border: rgba(255, 255, 255, 0.1);
+  --accent: #5da9ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* Top bar */
+.topbar {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--panel), var(--panel2));
+}
+
+.topbar .left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 420px;
+}
+
+.title {
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.file input {
+  display: none;
+}
+.file {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  user-select: none;
+}
+.file:hover {
+  border-color: rgba(93, 169, 255, 0.5);
+}
+
+.btn {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.btn:hover {
+  border-color: rgba(93, 169, 255, 0.6);
+}
+.btn.small {
+  padding: 6px 8px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+
+.status {
+  color: var(--muted);
+  font-size: 13px;
+  max-width: 520px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar .right {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.control {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.control label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.control input,
+.control select {
+  min-height: 36px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  outline: none;
+}
+.control input::placeholder {
+  color: rgba(159, 176, 204, 0.65);
+}
+
+/* Main layout: full height */
+.layout {
+  height: calc(100vh - 62px);
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+}
+
+.tableWrap {
+  flex: 1 1 auto;
+  min-width: 420px;
+  padding: 10px;
+}
+
+#table {
+  height: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* Divider for resizing */
+.divider {
+  width: 8px;
+  cursor: col-resize;
+  background: transparent;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+.divider:hover {
+  background: rgba(93, 169, 255, 0.08);
+}
+
+/* Side panel */
+.side {
+  width: 380px;
+  min-width: 260px;
+  max-width: 55vw;
+  border-left: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  display: flex;
+  flex-direction: column;
+}
+.side.hidden {
+  display: none;
+}
+
+.sideHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.sideTitle {
+  font-weight: 700;
+}
+.sideSub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.countsBlock {
+  padding: 12px;
+  overflow: auto;
+}
+.countsMeta {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 10px;
+  line-height: 1.35;
+}
+
+.countRow {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 10px;
+  margin-bottom: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.countRowTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+}
+.countName {
+  font-weight: 700;
+}
+.countTotal {
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.countDates {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.datePill {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.15);
+}
+.datePill .d {
+  color: var(--text);
+}
+.datePill .n {
+  color: var(--muted);
+}
+
+/* Tabulator tweaks to fit dark background better */
+.tabulator {
+  background: transparent !important;
+}
+.tabulator .tabulator-header {
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--border);
+}
+.tabulator .tabulator-col {
+  background: rgba(255, 255, 255, 0.03);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+.tabulator .tabulator-row {
+  background: transparent;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.tabulator .tabulator-row.tabulator-row-even {
+  background: rgba(255, 255, 255, 0.02);
+}
+.tabulator .tabulator-cell {
+  color: var(--text);
+}
