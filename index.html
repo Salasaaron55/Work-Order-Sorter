@@ -4,144 +4,160 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Work Order Viewer</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="style.css" />
 
-    <!-- CSV + XLSX parsers (client-side only) -->
+    <!-- For XLSX support (optional, but included since you provided an .xlsx sample) -->
     <script
       defer
-      src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"
+      src="https://cdn.jsdelivr.net/npm/xlsx@0.20.2/dist/xlsx.full.min.js"
     ></script>
-    <script
-      defer
-      src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"
-    ></script>
-
-    <script defer src="./app.js"></script>
+    <script defer src="app.js"></script>
   </head>
+
   <body>
-    <header class="app-header">
-      <div>
-        <h1>Work Order Viewer</h1>
-        <p class="subtle">
-          Upload a CSV/XLSX, filter by dates/keywords/people, drag headers to
-          reorder columns, and see daily counts per employee.
-        </p>
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="brand">
+          <div class="brand-title">Work Order Viewer</div>
+          <div class="brand-subtitle">
+            Upload CSV/XLSX → filter, sort, drag columns, and auto-count per
+            employee/day
+          </div>
+        </div>
       </div>
 
-      <div class="file-box">
-        <label class="file-label" for="fileInput">Upload CSV/XLSX</label>
-        <input id="fileInput" type="file" accept=".csv,.xlsx,.xls" />
-        <div class="file-meta" id="fileMeta">No file loaded</div>
+      <div class="topbar-right">
+        <label class="file-btn">
+          <input id="fileInput" type="file" accept=".csv,.xlsx,.xls" />
+          <span>Upload CSV/XLSX</span>
+        </label>
+
+        <button
+          id="resetLayoutBtn"
+          class="btn btn-ghost"
+          title="Reset saved column order/widths"
+        >
+          Reset layout
+        </button>
       </div>
     </header>
 
     <main class="layout">
-      <section class="panel">
-        <h2>Filters</h2>
-
-        <div class="grid">
+      <section class="panel controls">
+        <div class="controls-row">
           <div class="field">
-            <label for="searchInput">Keyword search</label>
+            <label>Keyword search</label>
             <input
-              id="searchInput"
+              id="keywordInput"
               type="text"
-              placeholder="Search WO, description, equipment..."
+              placeholder="Search Work Order, Description, Equipment, Dept, Type, Status..."
             />
           </div>
 
           <div class="field">
-            <label for="statusFilter">Status</label>
-            <select id="statusFilter"></select>
+            <label>Assigned To</label>
+            <select id="assignedSelect">
+              <option value="">All</option>
+            </select>
           </div>
 
           <div class="field">
-            <label for="typeFilter">Type</label>
-            <select id="typeFilter"></select>
+            <label>Status</label>
+            <select id="statusSelect">
+              <option value="">All</option>
+            </select>
           </div>
 
           <div class="field">
-            <label for="deptFilter">Department</label>
-            <select id="deptFilter"></select>
+            <label>Type</label>
+            <select id="typeSelect">
+              <option value="">All</option>
+            </select>
           </div>
 
           <div class="field">
-            <label for="assignedFilter">Assigned To</label>
-            <select id="assignedFilter"></select>
+            <label>Department</label>
+            <select id="deptSelect">
+              <option value="">All</option>
+            </select>
           </div>
+        </div>
 
+        <div class="controls-row">
           <div class="field">
-            <label for="dateFieldSelect">Date field</label>
-            <select id="dateFieldSelect"></select>
-          </div>
-
-          <div class="field">
-            <label for="dateFrom">From</label>
+            <label>Scheduled start date (from)</label>
             <input id="dateFrom" type="date" />
           </div>
 
           <div class="field">
-            <label for="dateTo">To</label>
+            <label>Scheduled start date (to)</label>
             <input id="dateTo" type="date" />
           </div>
-        </div>
 
-        <div class="actions">
-          <button id="clearFiltersBtn" type="button">Clear filters</button>
-          <button id="resetColumnsBtn" type="button" class="secondary">
-            Reset column order
-          </button>
-        </div>
+          <div class="field field-inline">
+            <label class="checkbox">
+              <input id="hideUnassigned" type="checkbox" />
+              <span>Hide unassigned</span>
+            </label>
+          </div>
 
-        <div class="stats">
-          <div class="stat">
-            <div class="stat-label">Rows (filtered)</div>
-            <div class="stat-value" id="rowCount">0</div>
+          <div class="field field-inline">
+            <label class="checkbox">
+              <input id="useCurrentFiltersForCounts" type="checkbox" checked />
+              <span>Counts follow current filters</span>
+            </label>
           </div>
-          <div class="stat">
-            <div class="stat-label">Unique employees</div>
-            <div class="stat-value" id="employeeCount">0</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Date range (filtered)</div>
-            <div class="stat-value" id="dateRangeLabel">—</div>
+
+          <div class="spacer"></div>
+
+          <div class="results-meta">
+            <div><strong id="rowCount">0</strong> rows shown</div>
+            <div class="hint">
+              Tip: drag column headers to rearrange (saved automatically).
+            </div>
           </div>
         </div>
       </section>
 
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Daily counts by employee</h2>
-          <p class="subtle">
-            Counts are based on the selected “Date field” and the current
-            filters.
-          </p>
-        </div>
-
-        <div class="table-wrap" id="countsWrap">
-          <div class="empty">Upload a file to see counts.</div>
+      <section class="panel table-wrap">
+        <div class="table-scroll">
+          <table id="dataTable">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
         </div>
       </section>
 
-      <section class="panel full">
-        <div class="panel-head">
-          <h2>Work Orders</h2>
-          <p class="subtle">
-            Click a header to sort. Drag headers to reorder columns (saved in
-            your browser).
-          </p>
+      <section class="panel summary">
+        <div class="summary-header">
+          <h2>Work Orders per Employee per Day</h2>
+          <div class="summary-actions">
+            <button id="exportSummaryBtn" class="btn btn-ghost">
+              Export summary CSV
+            </button>
+          </div>
         </div>
-
-        <div class="table-wrap" id="dataWrap">
-          <div class="empty">Upload a file to view work orders.</div>
+        <div class="summary-scroll">
+          <table id="summaryTable">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="summary-note">
+          Counts are grouped by <strong>Sched. Start Date</strong> (day) +
+          <strong>Assigned To</strong> (employee).
         </div>
       </section>
     </main>
 
     <footer class="footer">
-      <span class="subtle">
-        Tip: This runs entirely in your browser. On GitHub Pages, it’s still
-        local-only file processing.
-      </span>
+      <div class="footer-left">
+        <span class="dot"></span>
+        <span id="fileStatus">No file loaded.</span>
+      </div>
+      <div class="footer-right">
+        Date format shown as <strong>MM/DD/YYYY</strong>.
+      </div>
     </footer>
   </body>
 </html>
