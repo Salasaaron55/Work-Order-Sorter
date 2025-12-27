@@ -5,122 +5,176 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Work Order Viewer</title>
 
-    <!-- Tabulator -->
-    <link
-      href="https://unpkg.com/tabulator-tables@6.2.5/dist/css/tabulator.min.css"
-      rel="stylesheet"
-    />
-    <script
-      defer
-      src="https://unpkg.com/tabulator-tables@6.2.5/dist/js/tabulator.min.js"
-    ></script>
-
-    <!-- CSV + XLSX support -->
-    <script
-      defer
-      src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"
-    ></script>
-    <script
-      defer
-      src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"
-    ></script>
-
-    <!-- Date parsing/formatting -->
-    <script
-      defer
-      src="https://cdn.jsdelivr.net/npm/luxon@3.5.0/build/global/luxon.min.js"
-    ></script>
-
     <link rel="stylesheet" href="styles.css" />
-    <script defer src="app.js"></script>
+
+    <!-- Papa Parse for CSV -->
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+    <!-- SortableJS for drag-reorder columns -->
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
   </head>
 
   <body>
     <header class="topbar">
-      <div class="left">
-        <div class="title">Work Order Viewer</div>
-
-        <label class="file">
-          <input id="fileInput" type="file" accept=".csv,.xlsx,.xls" />
-          <span>Upload CSV/XLSX</span>
-        </label>
-
-        <button id="clearBtn" class="btn" title="Clear table + counts">
-          Clear
-        </button>
-
-        <div class="status" id="statusMsg" aria-live="polite"></div>
+      <div class="topbar__left">
+        <h1>Work Order Viewer</h1>
+        <p class="muted">
+          Upload a CSV, filter quickly, reorder columns (saved), and see daily
+          employee counts.
+        </p>
       </div>
 
-      <div class="right">
-        <div class="control">
-          <label for="searchInput">Search</label>
-          <input
-            id="searchInput"
-            type="search"
-            placeholder="keyword, WO#, equipment, description…"
-          />
-        </div>
-
-        <div class="control">
-          <label for="dateField">Count / Date Field</label>
-          <select id="dateField">
-            <option value="sched_start">Sched. Start Date</option>
-            <option value="orig_due">Original PM Due Date</option>
-            <option value="sched_end">Sched. End Date</option>
-          </select>
-        </div>
-
-        <div class="control">
-          <label for="dateFrom">From</label>
-          <input id="dateFrom" type="date" />
-        </div>
-
-        <div class="control">
-          <label for="dateTo">To</label>
-          <input id="dateTo" type="date" />
-        </div>
-
-        <div class="control">
-          <label for="assigneeFilter">Assigned To</label>
-          <select id="assigneeFilter">
-            <option value="">All</option>
-          </select>
-        </div>
-
-        <button id="toggleSideBtn" class="btn" title="Show/hide counts panel">
-          Counts
+      <div class="topbar__right">
+        <label class="fileBtn">
+          <input id="fileInput" type="file" accept=".csv,text/csv" />
+          <span>Upload CSV</span>
+        </label>
+        <button
+          id="btnResetLayout"
+          class="btn btn--ghost"
+          title="Reset saved column order"
+        >
+          Reset Columns
+        </button>
+        <button
+          id="btnClearData"
+          class="btn btn--danger"
+          title="Clear loaded data"
+        >
+          Clear Data
         </button>
       </div>
     </header>
 
     <main class="layout">
-      <section class="tableWrap">
-        <div id="table"></div>
+      <!-- Left controls -->
+      <section class="panel controls">
+        <div class="card">
+          <div class="card__title">Filters</div>
+
+          <div class="grid2">
+            <div class="field">
+              <label>Keyword search</label>
+              <input
+                id="qSearch"
+                type="text"
+                placeholder="Search Work Order, Description, Equipment, etc."
+              />
+            </div>
+
+            <div class="field">
+              <label>Assigned To</label>
+              <select id="assignedFilter">
+                <option value="">All</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label>Status</label>
+              <select id="statusFilter">
+                <option value="">All</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label>Type</label>
+              <select id="typeFilter">
+                <option value="">All</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label>Department</label>
+              <select id="deptFilter">
+                <option value="">All</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label>Date range column (for filtering)</label>
+              <select id="dateFilterColumn">
+                <option value="Scheduled start date">
+                  Scheduled start date
+                </option>
+                <option value="Original pm due date">
+                  Original pm due date
+                </option>
+                <option value="Scheduled end date">Scheduled end date</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label>Start date</label>
+              <input id="dateFrom" type="date" />
+            </div>
+
+            <div class="field">
+              <label>End date</label>
+              <input id="dateTo" type="date" />
+            </div>
+          </div>
+
+          <div class="row">
+            <button id="btnClearFilters" class="btn btn--ghost">
+              Clear Filters
+            </button>
+            <div class="spacer"></div>
+            <div id="rowCount" class="pill">0 rows</div>
+          </div>
+
+          <div class="help muted">
+            <strong>Tip:</strong> Column headers are draggable. Your order is
+            saved on this device/browser.
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card__title row">
+            <span>Daily employee counts</span>
+            <span class="spacer"></span>
+            <label class="inlineLabel muted">Count date column:</label>
+            <select id="countDateColumn" class="select--compact">
+              <option value="Scheduled start date">Scheduled start date</option>
+              <option value="Original pm due date">Original pm due date</option>
+              <option value="Scheduled end date">Scheduled end date</option>
+            </select>
+          </div>
+
+          <div id="countsWrap" class="countsWrap">
+            <div class="emptyState">Upload a CSV to see counts.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card__title">Loaded columns (debug)</div>
+          <div id="colDebug" class="mono muted small">No file loaded.</div>
+        </div>
       </section>
 
-      <div class="divider" id="divider" title="Drag to resize"></div>
-
-      <aside class="side" id="sidePanel">
-        <div class="sideHeader">
-          <div>
-            <div class="sideTitle">Counts (by employee × day)</div>
-            <div class="sideSub" id="countsSub">Based on filtered rows</div>
+      <!-- Right table -->
+      <section class="panel tablePanel">
+        <div class="card card--tight">
+          <div class="tableTools">
+            <div class="muted small">
+              Click a header to sort • Drag headers to reorder • Dates show as
+              <strong>MM/DD/YYYY</strong>
+            </div>
           </div>
-          <button
-            id="resetLayoutBtn"
-            class="btn small"
-            title="Reset saved column layout"
-          >
-            Reset Columns
-          </button>
-        </div>
 
-        <div class="countsBlock">
-          <div class="countsMeta" id="countsMeta"></div>
-          <div class="counts确保" id="countsList"></div>
+          <div class="tableWrap">
+            <table id="dataTable">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
-      </aside>
+      </section>
     </main>
+
+    <footer class="footer muted small">
+      Runs fully in your browser (good for GitHub Pages). Uses localStorage to
+      remember column order.
+    </footer>
+
+    <script src="app.js"></script>
   </body>
 </html>
